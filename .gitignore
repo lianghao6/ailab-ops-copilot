@@ -1,0 +1,36 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---- Generated synthetic data (regenerate with `make data`) ----
+data/*.json
+data/*.jsonl
+data/*.csv
+data/generated/
+!data/.gitkeep
+
+# ---- Runtime artifacts ----
+runs/
+*.log
+trace*.json
+
+# ---- Local config / secrets ----
+.env
+.env.local
+
+# ---- Editors / OS ----
+.vscode/
+.idea/
+.DS_Store

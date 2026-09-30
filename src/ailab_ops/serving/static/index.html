@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AILab Ops Copilot</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#161a21; --panel2:#1c2129; --line:#2a313c;
+    --fg:#e6e9ef; --muted:#8b95a5; --accent:#5b8def; --ok:#3fb950;
+    --warn:#d29922; --err:#f85149; --degrade:#a371f7;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  header{padding:14px 20px;border-bottom:1px solid var(--line);
+         display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+  header h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.2px}
+  header .tag{font-size:11px;color:var(--muted);border:1px solid var(--line);
+              padding:1px 7px;border-radius:10px}
+  .wrap{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:0;height:calc(100vh - 52px)}
+  @media (max-width:980px){.wrap{grid-template-columns:1fr;height:auto}}
+  .col{padding:16px 20px;overflow-y:auto;min-width:0}
+  .col.left{border-right:1px solid var(--line)}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;
+        padding:12px 14px;margin-bottom:12px}
+  .card h2{font-size:12px;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);
+           margin:0 0 10px;font-weight:600}
+  label{display:block;font-size:12px;color:var(--muted);margin:8px 0 4px}
+  input,select,textarea,button{font:inherit;color:var(--fg);background:var(--panel2);
+        border:1px solid var(--line);border-radius:6px;padding:7px 9px;width:100%}
+  textarea{resize:vertical;min-height:56px;font-family:var(--mono);font-size:12.5px}
+  button{cursor:pointer;background:var(--accent);border-color:var(--accent);color:#fff;
+         font-weight:600;width:auto;padding:8px 16px}
+  button.ghost{background:transparent;border-color:var(--line);color:var(--fg);font-weight:500}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .row>*{flex:0 0 auto}
+  .row .grow{flex:1 1 auto;min-width:120px}
+  .muted{color:var(--muted)}
+  .mono{font-family:var(--mono);font-size:12.5px}
+  .pill{display:inline-block;font-size:11px;padding:1px 7px;border-radius:10px;
+        border:1px solid var(--line);color:var(--muted)}
+  .pill.ok{color:var(--ok);border-color:#1f4d2b;background:#0d1f12}
+  .pill.err{color:var(--err);border-color:#5a2220;background:#1f0d0d}
+  .pill.warn{color:var(--warn);border-color:#4d3d11;background:#1f1a0b}
+  .pill.deg{color:var(--degrade);border-color:#3f2a66;background:#150f26}
+  .pill.cache{color:var(--accent);border-color:#233a63;background:#0c1526}
+  pre{white-space:pre-wrap;word-break:break-word;margin:0;font-family:var(--mono);font-size:12.5px}
+  .step{display:flex;gap:8px;align-items:flex-start;padding:5px 0;
+        border-bottom:1px solid #20252d;font-size:12.5px}
+  .step:last-child{border-bottom:0}
+  .step .n{color:var(--muted);min-width:18px;text-align:right}
+  .step .b{flex:1 1 auto;min-width:0}
+  .step .d{color:var(--muted);white-space:nowrap}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;font-size:12.5px;font-family:var(--mono)}
+  .kv .k{color:var(--muted)}
+  .bar{height:5px;background:var(--panel2);border-radius:3px;overflow:hidden;margin-top:4px}
+  .bar>i{display:block;height:100%;background:var(--accent)}
+  .bar.hot>i{background:var(--err)}
+  .hint{font-size:11.5px;color:var(--muted);margin-top:6px}
+  .spinner{width:11px;height:11px;border:2px solid var(--line);border-top-color:var(--accent);
+           border-radius:50%;display:inline-block;animation:sp .7s linear infinite;vertical-align:-1px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  details summary{cursor:pointer;color:var(--muted);font-size:12px}
+  details[open] summary{margin-bottom:8px}
+  .rl{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+</style>
+</head>
+<body>
+<header>
+  <h1>AILab Ops Copilot</h1>
+  <span class="tag">simulated enterprise AIOps agent</span>
+  <span class="tag" id="backend">backend: ?</span>
+  <span class="tag" id="worldtag">world: ?</span>
+  <span class="grow"></span>
+  <span class="pill" id="healthpill">…</span>
+</header>
+
+<div class="wrap">
+  <div class="col left">
+    <div class="card">
+      <h2>Ask</h2>
+      <label for="jobsel">Pick a failed job (data is synthetic)</label>
+      <select id="jobsel"></select>
+      <label for="q">Question</label>
+      <textarea id="q">Why did this job fail? Give me the root cause and what to do about it.</textarea>
+      <div class="row" style="margin-top:10px">
+        <button id="ask">Diagnose</button>
+        <button class="ghost" id="stream">Diagnose (stream)</button>
+        <button class="ghost" id="stop" disabled>Stop</button>
+        <label style="margin:0 0 0 6px;display:flex;gap:6px;align-items:center;color:var(--fg)">
+          <input type="checkbox" id="nocache" style="width:auto"> bypass cache
+        </label>
+      </div>
+      <div class="hint" id="status"></div>
+    </div>
+
+    <div class="card">
+      <h2>Diagnosis</h2>
+      <div id="answer" class="muted">No diagnosis yet.</div>
+    </div>
+
+    <div class="card">
+      <h2>Agent steps</h2>
+      <div id="steps" class="muted">—</div>
+      <div class="hint">The step sequence <em>is</em> the agent. Every tool call is a row; a
+        diagnosis that looks right for the wrong reasons usually shows up here as a step that
+        was never taken.</div>
+    </div>
+  </div>
+
+  <div class="col right">
+    <div class="card">
+      <h2>Request accounting</h2>
+      <div class="kv" id="acc"><span class="k">—</span><span>no request yet</span></div>
+    </div>
+
+    <div class="card">
+      <h2>Concurrency gate</h2>
+      <div class="kv" id="gate"><span class="k">—</span><span>loading</span></div>
+      <div class="hint">This is the component that protects the model server. Watch
+        <span class="mono">in_flight</span> and <span class="mono">queued</span> while a load
+        test runs.</div>
+    </div>
+
+    <div class="card">
+      <h2>Rate limits and budget</h2>
+      <div class="kv" id="limits"><span class="k">—</span><span>loading</span></div>
+    </div>
+
+    <div class="card">
+      <h2>Cache, sessions, breakers</h2>
+      <div class="kv" id="cache"><span class="k">—</span><span>loading</span></div>
+    </div>
+
+    <div class="card">
+      <h2>Fault injection</h2>
+      <div class="row">
+        <button class="ghost" id="degrade">Kill the model service</button>
+        <button class="ghost" id="restore">Restore it</button>
+      </div>
+      <div class="hint">The system should keep answering from the deterministic evidence path,
+        clearly labelled as degraded, and should recover on its own once restored.</div>
+    </div>
+
+    <div class="card">
+      <h2>Raw answer</h2>
+      <details><summary>show</summary><pre id="raw" class="muted">—</pre></details>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let SESSION = null, controller = null;
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const text = await r.text();
+  let body; try { body = JSON.parse(text); } catch { body = { raw: text }; }
+  if (!r.ok) throw Object.assign(new Error(body.message || r.statusText), { status: r.status, body });
+  return body;
+}
+
+function kv(el, pairs) {
+  el.innerHTML = pairs.map(([k, v]) =>
+    `<span class="k">${k}</span><span>${v}</span>`).join("");
+}
+function esc(s){return String(s ?? "").replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+function ms(v){ return v == null ? "–" : (v < 1000 ? `${Math.round(v)}ms` : `${(v/1000).toFixed(2)}s`); }
+
+async function loadJobs() {
+  const data = await api("/v1/jobs?limit=60");
+  const failed = data.jobs.filter(j => j.failed);
+  const el = $("jobsel");
+  el.innerHTML = failed.map(j =>
+    `<option value="${j.job_id}">${j.job_id} · ${esc(j.name)} · ${j.status} · exit ${j.exit_code} · ${esc(j.difficulty||"")}</option>`
+  ).join("") || `<option value="">no failed jobs</option>`;
+}
+
+async function loadMeta() {
+  try {
+    const m = await api("/v1/meta");
+    $("backend").textContent = `seed ${m.seed} · ${m.summary.n_jobs} jobs · ${m.summary.n_failed} failed`;
+    $("worldtag").textContent = `${m.summary.n_incidents} incidents · boot ${ms(m.boot_ms)}`;
+  } catch (e) { $("worldtag").textContent = "meta unavailable"; }
+}
+
+async function loadStats() {
+  try {
+    const h = await api("/v1/health");
+    const st = await api("/v1/stats");
+    const g = h.gate;
+    const pill = $("healthpill");
+    pill.textContent = h.status;
+    pill.className = "pill " + (h.status === "ok" ? "ok" : "deg");
+
+    $("backend").textContent = `${h.llm_backend} · ${h.llm_model}`;
+
+    kv($("gate"), [
+      ["in_flight", `${g.in_flight} / ${h.limits.limits.tenant_concurrency}`],
+      ["queued", g.queued],
+      ["admitted", g.admitted],
+      ["avg wait", ms(g.avg_wait_ms)],
+      ["max wait", ms(g.max_wait_ms)],
+      ["rejected (full)", g.rejected_queue_full],
+      ["rejected (timeout)", g.rejected_timeout],
+    ]);
+
+    const lim = h.limits;
+    const tenants = Object.entries(lim.tenants).map(([t, v]) =>
+      `<div class="rl"><span class="pill">${t}</span><span class="muted mono">inflight ${v.in_flight} · $${v.usd_today} · ${v.tokens_last_min} tok/min</span></div>`
+    ).join("") || "<span class='muted'>no tenant activity yet</span>";
+    $("limits").innerHTML = `
+      <div class="kv">
+        <span class="k">user_qps</span><span>${lim.limits.user_qps}</span>
+        <span class="k">tenant_concurrency</span><span>${lim.limits.tenant_concurrency}</span>
+        <span class="k">tenant_token/min</span><span>${lim.limits.tenant_token_per_min}</span>
+        <span class="k">tenant_usd/day</span><span>${lim.limits.tenant_cost_per_day_usd}</span>
+      </div>
+      <div style="margin-top:8px">${tenants}</div>
+      ${Object.keys(lim.rejections).length ? `<div class="hint">rejections: ${JSON.stringify(lim.rejections)}</div>` : ""}`;
+
+    const c = h.cache, s = h.sessions;
+    const br = Object.values(h.breakers).map(b =>
+      `<div class="rl"><span class="pill ${b.state === "open" ? "err" : "ok"}">${b.name}: ${b.state}</span>
+       <span class="muted mono">failures ${b.failures} · trips ${b.trips}${b.retry_in_s ? " · retry in " + b.retry_in_s + "s" : ""}</span></div>`
+    ).join("") || "<span class='muted'>no breakers touched yet</span>";
+    $("cache").innerHTML = `
+      <div class="kv">
+        <span class="k">cache hit rate</span><span>${(c.hit_rate*100).toFixed(0)}% (${c.hits} hit / ${c.misses} miss, ${c.near_hits} near)</span>
+        <span class="k">cache entries</span><span>${c.entries}</span>
+        <span class="k">sessions</span><span>${s.sessions} (evicted ${s.evictions})</span>
+        <span class="k">total usd</span><span>$${st.metrics.cost.total_usd}</span>
+        <span class="k">p50 / p99 request</span><span>${ms(st.metrics.histograms["request.elapsed_ms"]?.p50)} / ${ms(st.metrics.histograms["request.elapsed_ms"]?.p99)}</span>
+      </div>
+      <div style="margin-top:8px">${br}</div>
+      <details style="margin-top:8px"><summary>tool usage</summary>
+        <pre class="muted">${esc(JSON.stringify(st.tools, null, 2))}</pre></details>`;
+  } catch (e) {
+    $("healthpill").textContent = "unreachable";
+    $("healthpill").className = "pill err";
+  }
+}
+
+function renderSteps(steps) {
+  if (!steps.length) { $("steps").innerHTML = "<span class='muted'>—</span>"; return; }
+  $("steps").innerHTML = steps.map((s, i) => `
+    <div class="step">
+      <span class="n">${s.index ?? i+1}</span>
+      <span class="b">
+        ${s.kind === "tool"
+          ? `<span class="pill ${s.ok === false ? "err" : "ok"}">${esc(s.tool)}</span>
+             <span class="muted mono">${esc(JSON.stringify(s.arguments||{}))}</span>
+             ${s.note ? `<div class="hint">${esc(s.note)}</div>` : ""}
+             ${s.error ? `<div class="hint" style="color:var(--err)">${esc(s.error)}</div>` : ""}`
+          : `<span class="pill">llm</span> <span class="muted">${esc(s.note || "final answer")}</span>`}
+      </span>
+      <span class="d">${ms(s.duration_ms)}</span>
+    </div>`).join("");
+}
+
+function renderAnswer(d) {
+  const p = d.parsed;
+  const badge = d.served_by === "cache" ? "cache" : d.served_by === "evidence_only" ? "degraded" : "full";
+  const klass = badge === "degraded" ? "deg" : badge === "cache" ? "cache" : "ok";
+  let html = `<div class="row"><span class="pill ${klass}">${badge}</span>`;
+  if (d.cache) html += `<span class="muted mono">${d.cache} match</span>`;
+  if (d.degraded_reason) html += `<span class="muted mono">${esc(d.degraded_reason)}</span>`;
+  html += `</div>`;
+  if (p) {
+    html += `<div class="kv" style="margin-top:10px">
+      <span class="k">root cause</span><span><b>${esc(p.root_cause || "?")}</b> ${p.insufficient_evidence ? "<span class='pill warn'>refused to guess</span>" : ""}</span>
+      <span class="k">category</span><span>${esc(p.category || "?")}</span>
+      <span class="k">confidence</span><span>${p.confidence ?? "–"}<div class="bar ${p.confidence < .5 ? "hot" : ""}"><i style="width:${Math.round((p.confidence||0)*100)}%"></i></div></span>
+    </div>`;
+    if (p.summary) html += `<p style="margin:10px 0 0">${esc(p.summary)}</p>`;
+    if (p.evidence?.length) html += `<div style="margin-top:10px"><div class="muted" style="font-size:11.5px">EVIDENCE</div>` +
+      p.evidence.map(e => `<div class="mono muted">· ${esc(typeof e === "string" ? e : JSON.stringify(e))}</div>`).join("") + `</div>`;
+    if (p.ruled_out?.length) html += `<div style="margin-top:10px"><div class="muted" style="font-size:11.5px">RULED OUT</div>` +
+      p.ruled_out.map(r => `<div class="mono muted">· ${esc(r.cause || r)} ${r.why ? "— " + esc(r.why) : ""}</div>`).join("") + `</div>`;
+    if (p.remediation?.length) html += `<div style="margin-top:10px"><div class="muted" style="font-size:11.5px">REMEDIATION</div>` +
+      p.remediation.map(r => `<div class="mono">· ${esc(typeof r === "string" ? r : JSON.stringify(r))}</div>`).join("") + `</div>`;
+    if (p.citations?.length) html += `<div class="hint" style="margin-top:10px">sources: ${p.citations.map(esc).join(", ")}</div>`;
+  } else {
+    html += `<pre style="margin-top:8px">${esc(d.answer)}</pre>`;
+  }
+  $("answer").innerHTML = html;
+  $("raw").textContent = JSON.stringify(d, null, 2);
+  if (d.session_id) SESSION = d.session_id;
+  const a = $("acc");
+  kv(a, [
+    ["served_by", d.served_by],
+    ["tokens in/out", `${d.usage_in}/${d.usage_out}`],
+    ["usd", "$" + (d.usd ?? 0).toFixed(6)],
+    ["gate wait", ms(d.gate_wait_ms)],
+    ["elapsed", ms(d.elapsed_ms)],
+    ["tool calls", d.n_tool_calls],
+    ["llm calls", d.n_llm_calls],
+    ["stop reason", esc(d.stop_reason)],
+    ["session", esc(d.session_id || "–")],
+  ]);
+}
+
+$("jobsel").addEventListener("change", () => {
+  const id = $("jobsel").value;
+  if (id) $("q").value = `Why did ${id} fail? Give me the root cause and what to do about it.`;
+});
+
+$("ask").addEventListener("click", async () => {
+  $("ask").disabled = true; $("stream").disabled = true;
+  $("status").innerHTML = `<span class="spinner"></span> diagnosing…`;
+  try {
+    const d = await api("/v1/diagnose", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question: $("q").value, session_id: SESSION, no_cache: $("nocache").checked }),
+    });
+    renderAnswer(d); renderSteps(d.steps || []);
+    $("status").textContent = `done in ${ms(d.elapsed_ms)}`;
+  } catch (e) {
+    const b = e.body || {};
+    $("answer").innerHTML = `<span class="pill err">${esc(b.error || e.message)}</span>
+      <p class="muted">${esc(b.message || "")}</p>`;
+    $("status").textContent = `failed: ${b.error || e.status}`;
+  } finally {
+    $("ask").disabled = false; $("stream").disabled = false; loadStats();
+  }
+});
+
+$("stream").addEventListener("click", async () => {
+  $("stream").disabled = true; $("stop").disabled = false;
+  $("steps").innerHTML = ""; $("status").innerHTML = `<span class="spinner"></span> streaming…`;
+  controller = new AbortController();
+  const steps = [];
+  try {
+    const r = await fetch("/v1/diagnose/stream", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({ question: $("q").value, session_id: SESSION, no_cache: $("nocache").checked }),
+    });
+    const reader = r.body.getReader(); const dec = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const frames = buf.split("\n\n"); buf = frames.pop();
+      for (const f of frames) {
+        const ev = /^event:\s*(.+)$/m.exec(f)?.[1]?.trim();
+        const dm = /^data:\s*([\s\S]+)$/m.exec(f); if (!dm) continue;
+        let data; try { data = JSON.parse(dm[1]); } catch { continue; }
+        if (ev === "step") { steps.push(data); renderSteps(steps); }
+        else if (ev === "stage") $("status").innerHTML = `<span class="spinner"></span> ${esc(data.name)}: ${esc(data.detail)}`;
+        else if (ev === "answer") { renderSteps(steps); }
+        else if (ev === "done") { renderAnswer({ ...data, parsed: data.parsed, answer: "", session_id: data.session_id, steps }); }
+        else if (ev === "error") $("status").innerHTML = `<span class="pill err">${esc(data.kind)}</span> ${esc(data.message)}`;
+      }
+    }
+    $("status").textContent = "stream complete";
+  } catch (e) {
+    if (e.name !== "AbortError") $("status").textContent = "stream error: " + e.message;
+    else $("status").textContent = "stopped by user";
+  } finally {
+    $("stream").disabled = false; $("stop").disabled = true; controller = null; loadStats();
+  }
+});
+
+$("stop").addEventListener("click", () => controller?.abort());
+$("degrade").addEventListener("click", async () => {
+  await api("/v1/admin/force-degrade?on=true", { method: "POST" }); loadStats();
+});
+$("restore").addEventListener("click", async () => {
+  await api("/v1/admin/force-degrade?on=false", { method: "POST" }); loadStats();
+});
+
+(async function init() {
+  await loadMeta(); await loadJobs(); await loadStats();
+  const first = $("jobsel").value;
+  if (first) $("q").value = `Why did ${first} fail? Give me the root cause and what to do about it.`;
+  setInterval(loadStats, 2500);
+})();
+</script>
+</body>
+</html>

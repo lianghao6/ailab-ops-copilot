@@ -1,0 +1,932 @@
+# =============================================================================
+# AILab Ops Copilot — Fault Playbook (fault taxonomy)
+# =============================================================================
+# This file is the SOURCE OF TRUTH for the whole project.
+#
+# Everything downstream is derived from it:
+#   * the synthetic job generator (which failures exist, how often, how loud)
+#   * the log / metric synthesizers (what a fault looks like in telemetry)
+#   * the knowledge base builder (each scenario's `runbook` becomes a document)
+#   * the evaluation harness (each job carries its `root_cause` as ground truth)
+#   * the mock LLM reasoner (matches `signals` to reach a diagnosis)
+#
+# NOTHING IN THIS FILE DESCRIBES A REAL SYSTEM. Company, clusters, hosts,
+# paths, job ids and log lines are all invented. The failure *patterns* are
+# abstracted from generally-known distributed-training failure modes so the
+# exercise feels realistic, which is the whole point of a teaching dataset.
+#
+# Field reference
+#   id             stable machine key, also the ground-truth label
+#   name           human-facing name (used in the UI and in reports)
+#   category       coarse bucket, drives per-category eval breakdowns
+#   root_cause     the label the agent must produce; usually == id
+#   prevalence     sampling weight (relative, normalized at generation time)
+#   difficulty     easy | medium | hard   (drives which eval split it lands in)
+#   signals        machine-usable evidence used to synthesize telemetry AND
+#                  by the mock reasoner to score candidate hypotheses
+#   distractors    scenario ids that produce overlapping evidence; used to
+#                  build "hard" cases where the agent must discriminate
+#   remediation    the fix, surfaced in the answer and in retrieval docs
+#   runbook        title/body -> becomes a knowledge-base document
+# =============================================================================
+
+meta:
+  schema_version: 2
+  domain: "distributed training / evaluation platform operations"
+  # Difficulty split targets for the generated dataset. The `hard` split is
+  # where the interesting engineering lives: ambiguous or contradictory signals.
+  split_ratios:
+    easy: 0.55
+    medium: 0.32
+    hard: 0.13
+  # Fraction of jobs generated with deliberately weak telemetry (log level
+  # raised, no metrics exported). The correct answer for these is
+  # "insufficient_evidence" -- refusing to guess is a graded skill.
+  insufficient_evidence_ratio: 0.06
+
+scenarios:
+
+  # ---------------------------------------------------------------------------
+  # MEMORY
+  # ---------------------------------------------------------------------------
+  - id: oom_gpu
+    name: GPU out of memory
+    category: memory
+    difficulty: easy
+    prevalence: 9
+    distractors: [oom_host, memory_leak, rank_crash_assert]
+    signals:
+      log_patterns:
+        - { pattern: "CUDA out of memory", weight: 1.00 }
+        - { pattern: "Tried to allocate", weight: 0.55 }
+        - { pattern: "GPU 0 has a total capacity of", weight: 0.45 }
+        - { pattern: "torch.cuda.OutOfMemoryError", weight: 0.85 }
+      metric_shapes:
+        - { name: gpu_mem_used_pct, shape: ramp_to_ceiling, weight: 0.90 }
+        - { name: gpu_util_pct, shape: spike_then_zero, weight: 0.60 }
+      exit_codes: [1, 137]
+      terminal: true
+    remediation: >
+      Reduce per-device batch size or sequence length, enable activation
+      checkpointing / ZeRO-3, or raise tensor parallelism. Confirm the peak is
+      at the first optimizer step, which points at optimizer state rather than
+      activations.
+    runbook:
+      title: "Runbook: GPU out of memory during training"
+      body: >
+        Symptom: the job dies at or shortly after the first optimizer step and
+        the rank that dies is not always rank 0. The traceback names the
+        allocation that failed. Diagnosis: read `gpu_mem_used_pct` — a monotone
+        climb to ~100% followed by a cliff is activation or optimizer state,
+        not a leak. Distinguish from host OOM (which shows a host memory ramp
+        and no CUDA traceback) and from a leak (which takes many steps to
+        accumulate and repeats after each checkpoint). Fix: lower per-device
+        batch size first; if the peak is at step 0, shard optimizer state.
+
+  - id: oom_host
+    name: Host (CPU) memory exhausted
+    category: memory
+    difficulty: easy
+    prevalence: 4
+    distractors: [oom_gpu, memory_leak]
+    signals:
+      log_patterns:
+        - { pattern: "Killed process", weight: 0.90 }
+        - { pattern: "Out of memory: Kill process", weight: 1.00 }
+        - { pattern: "oom-kill:constraint=CONSTRAINT_NONE", weight: 0.70 }
+      metric_shapes:
+        - { name: host_mem_used_pct, shape: ramp_to_ceiling, weight: 0.95 }
+        - { name: gpu_mem_used_pct, shape: flat, weight: 0.40 }
+      exit_codes: [137]
+      terminal: true
+    remediation: >
+      Raise the container memory limit or move the dataloader to a bounded
+      buffer. Common trigger: an unbounded prefetch queue in the input
+      pipeline, or a tokenizer cache that grows with corpus size.
+    runbook:
+      title: "Runbook: host memory exhaustion and OOM-kill"
+      body: >
+        The kernel kills the process with SIGKILL, so the application log often
+        ends mid-line with no traceback at all. The decisive evidence is in the
+        kernel log line `Out of memory: Kill process`, plus a host memory ramp.
+        Because the death is a SIGKILL, the framework cannot emit a graceful
+        error — do not read the absence of a traceback as "the job hung".
+        Contrast with GPU OOM, which always shows a CUDA traceback and a GPU
+        memory pattern, not a host memory pattern.
+
+  - id: memory_leak
+    name: Steady memory leak across steps
+    category: memory
+    difficulty: medium
+    prevalence: 3
+    distractors: [oom_gpu, oom_host, watchdog_hang]
+    signals:
+      log_patterns:
+        - { pattern: "step loss", weight: 0.20 }
+        - { pattern: "WARNING: memory usage", weight: 0.35 }
+      metric_shapes:
+        - { name: host_mem_used_pct, shape: sawtooth_rising, weight: 0.85 }
+        - { name: gpu_mem_used_pct, shape: sawtooth_rising, weight: 0.55 }
+      exit_codes: [137, 1]
+      terminal: true
+    remediation: >
+      Look for a metric or tensor kept alive across steps (an accumulating list,
+      an un-detached loss, a retained autograd graph). Bisect by disabling
+      checkpointing, then the EMA/metrics module, then the dataloader workers.
+    runbook:
+      title: "Runbook: memory growth across steps (leak)"
+      body: >
+        The signature is a rising sawtooth: memory climbs for many steps, drops
+        when something is freed (a checkpoint, an LRU eviction), then climbs
+        again from a higher floor. The floor rising is what distinguishes a leak
+        from a healthy sawtooth. Leaks are slow — the job survives far longer
+        than an OOM-at-step-0 and often dies hours in, which is why the incident
+        timeline matters more than the last log line.
+
+  # ---------------------------------------------------------------------------
+  # NETWORK / COMMUNICATION
+  # ---------------------------------------------------------------------------
+  - id: dependency_download_timeout
+    name: Dependency download timed out
+    category: network
+    difficulty: easy
+    prevalence: 7
+    distractors: [network_unreachable, dns_failure, image_pull_failed]
+    signals:
+      log_patterns:
+        - { pattern: "Read timed out", weight: 0.80 }
+        - { pattern: "Failed to download", weight: 0.85 }
+        - { pattern: "Connection timed out", weight: 0.75 }
+        - { pattern: "Could not resolve host", weight: 0.30 }
+      metric_shapes:
+        - { name: net_tx_retrans_pct, shape: noisy_high, weight: 0.70 }
+        - { name: disk_write_mbps, shape: flat, weight: 0.30 }
+      exit_codes: [1, 2]
+      terminal: true
+    remediation: >
+      Point the build at an internal mirror, or pre-bake the dependency into the
+      image. Retries help only when the failure is intermittent — check whether
+      several hosts failed for the same artifact.
+    runbook:
+      title: "Runbook: dependency download timeouts"
+      body: >
+        This happens before any training code runs, so there is no framework
+        traceback — only a package manager or HTTP client error near the top of
+        the log. `net_tx_retrans_pct` rising while `disk_write_mbps` stays flat
+        means bytes were never delivered. Escalation rule: if one artifact times
+        out across multiple hosts, it is the mirror, not the host. If it is one
+        host, it is that host's egress.
+
+  - id: network_unreachable
+    name: Network unreachable / route failure
+    category: network
+    difficulty: medium
+    prevalence: 4
+    distractors: [dependency_download_timeout, dns_failure, collective_timeout]
+    signals:
+      log_patterns:
+        - { pattern: "Network is unreachable", weight: 1.00 }
+        - { pattern: "No route to host", weight: 0.95 }
+        - { pattern: "connect() failed", weight: 0.50 }
+      metric_shapes:
+        - { name: net_tx_retrans_pct, shape: cliff_to_zero, weight: 0.75 }
+        - { name: net_rx_mbps, shape: cliff_to_zero, weight: 0.65 }
+      exit_codes: [1, 137]
+      terminal: true
+    remediation: >
+      Check the pod network policy and the node's routes. If only some hosts are
+      affected, the blast radius usually matches a single rack, subnet, or node
+      pool.
+    runbook:
+      title: "Runbook: network unreachable"
+      body: >
+        Distinguished from a dependency timeout by the error class: this is the
+        kernel refusing to send (EHOSTUNREACH / ENETUNREACH), not a peer failing
+        to answer. Retransmits collapse to zero rather than spiking, because
+        nothing is leaving the interface. Grouping incidents by host reveals
+        whether the blast radius is one node or a whole pool — that difference
+        decides whether you remediate or escalate.
+
+  - id: dns_failure
+    name: DNS resolution failure
+    category: network
+    difficulty: medium
+    prevalence: 2
+    distractors: [dependency_download_timeout, network_unreachable]
+    signals:
+      log_patterns:
+        - { pattern: "Temporary failure in name resolution", weight: 1.00 }
+        - { pattern: "getaddrinfo", weight: 0.70 }
+        - { pattern: "Could not resolve host", weight: 0.85 }
+      metric_shapes:
+        - { name: net_tx_retrans_pct, shape: flat, weight: 0.35 }
+      exit_codes: [1]
+      terminal: true
+    remediation: >
+      Verify the resolver config and search domains in the pod. If resolution
+      works from one namespace and not another, the difference is the DNS
+      policy, not the service.
+    runbook:
+      title: "Runbook: DNS resolution failure"
+      body: >
+        The tell is `getaddrinfo` / name resolution wording rather than an IP
+        or route error. Note the trap: this often co-occurs with a download
+        error, because a failed lookup breaks the download too. The
+        discriminating question is whether the client ever reached a socket —
+        if not, the network is fine and the resolver is the problem.
+
+  - id: collective_timeout
+    name: Collective communication timeout
+    category: network
+    difficulty: hard
+    prevalence: 5
+    distractors: [rank_crash_assert, watchdog_hang, node_preempted]
+    signals:
+      log_patterns:
+        - { pattern: "Watchdog caught collective operation timeout", weight: 1.00 }
+        - { pattern: "NCCL timeout", weight: 0.90 }
+        - { pattern: "Aborted due to timeout", weight: 0.60 }
+        - { pattern: "some ranks did not join", weight: 0.55 }
+      metric_shapes:
+        - { name: gpu_util_pct, shape: staircase, weight: 0.70 }
+        - { name: net_rx_mbps, shape: cliff_to_zero, weight: 0.60 }
+      exit_codes: [1, 137, 143]
+      terminal: true
+    remediation: >
+      Find the rank that stopped first — it is usually not rank 0, which merely
+      logs the loudest. Its earlier, unique error is the true cause; the timeout
+      elsewhere is a cascade. Fix the first rank's fault, then re-run.
+    runbook:
+      title: "Runbook: collective timeout is usually a cascade, not a cause"
+      body: >
+        This is the single most mis-diagnosed pattern in distributed training.
+        One rank dies; the others block in a collective; the watchdog fires on
+        every surviving rank after the timeout window. The logs therefore show
+        the timeout on many ranks and the real error on exactly one. Procedure:
+        do not read rank 0; diff the per-rank logs and locate the rank whose
+        first error timestamp is earliest and whose message is unique. Then
+        classify THAT error. Aborting on the timeout is treating a symptom.
+
+  - id: rank_crash_assert
+    name: Rank crashed on a device-side assert
+    category: runtime
+    difficulty: hard
+    prevalence: 4
+    distractors: [collective_timeout, oom_gpu, port_conflict]
+    signals:
+      log_patterns:
+        - { pattern: "device-side assert triggered", weight: 1.00 }
+        - { pattern: "probability tensor contains either `inf`", weight: 0.70 }
+        - { pattern: "AssertionError", weight: 0.60 }
+        - { pattern: "CUDA error: device-side assert", weight: 0.85 }
+      metric_shapes:
+        - { name: gpu_util_pct, shape: cliff_to_zero, weight: 0.65 }
+        - { name: loss, shape: noisy_high, weight: 0.45 }
+      exit_codes: [1, 134, 137]
+      terminal: true
+    remediation: >
+      Guard the numerics that fed the assert (clamp, nan_to_num, fp32 for the
+      reduction). Because the assert kills one rank, expect a collective timeout
+      cascade afterwards — fix the assert, the cascade disappears.
+    runbook:
+      title: "Runbook: device-side asserts and the cascade they cause"
+      body: >
+        A device-side assert aborts the CUDA context of one rank. That rank
+        exits; its peers then time out in the next collective. So the incident
+        contains two error classes and only one of them is causal. Triage order:
+        look for the assert first, because it is always earliest. Also check
+        whether loss or a probability tensor went non-finite beforehand — a
+        numerics bug upstream of the assert is the real root cause, and fixing
+        only the assert leaves the job unstable.
+
+  # ---------------------------------------------------------------------------
+  # STORAGE
+  # ---------------------------------------------------------------------------
+  - id: disk_full
+    name: Local disk exhausted
+    category: storage
+    difficulty: easy
+    prevalence: 5
+    distractors: [quota_exceeded, s3_read_error]
+    signals:
+      log_patterns:
+        - { pattern: "No space left on device", weight: 1.00 }
+        - { pattern: "ENOSPC", weight: 0.90 }
+        - { pattern: "cannot write", weight: 0.35 }
+      metric_shapes:
+        - { name: disk_used_pct, shape: ramp_to_ceiling, weight: 0.95 }
+        - { name: disk_write_mbps, shape: cliff_to_zero, weight: 0.55 }
+      exit_codes: [1, 28]
+      terminal: true
+    remediation: >
+      Enforce a checkpoint retention policy and cap the local scratch
+      directory. If the fill is fast, a log or cache is writing unbounded.
+    runbook:
+      title: "Runbook: local disk exhaustion"
+      body: >
+        `ENOSPC` is unambiguous, but the cause is what matters: checkpoints that
+        are never pruned, an unbounded log, or a scratch dir shared with other
+        jobs. `disk_used_pct` hitting 100% before the failure tells you whether
+        this was a slow accumulation (policy problem) or a step change (one bad
+        write). Distinguish from a storage quota, which fails on a specific
+        bucket/path while local disk stays healthy.
+
+  - id: quota_exceeded
+    name: Storage quota exceeded
+    category: storage
+    difficulty: medium
+    prevalence: 2
+    distractors: [disk_full, s3_read_error]
+    signals:
+      log_patterns:
+        - { pattern: "Quota exceeded", weight: 1.00 }
+        - { pattern: "403 Forbidden", weight: 0.55 }
+        - { pattern: "exceeded your current quota", weight: 0.85 }
+      metric_shapes:
+        - { name: disk_used_pct, shape: flat, weight: 0.70 }
+      exit_codes: [1]
+      terminal: true
+    remediation: >
+      Raise the quota or move artifacts to a different bucket. Local disk being
+      healthy while writes fail means the ceiling is remote.
+    runbook:
+      title: "Runbook: remote storage quota exceeded"
+      body: >
+        Looks like a disk problem, is not one. The discriminator is that local
+        `disk_used_pct` stays low while the write to the remote path fails with
+        an authorization or quota error, not ENOSPC. A 403 alongside the quota
+        message is common. Remediation is an ownership/quota decision, so it is
+        usually an escalation rather than a code change.
+
+  - id: s3_read_error
+    name: Object store read failure
+    category: storage
+    difficulty: medium
+    prevalence: 3
+    distractors: [quota_exceeded, nfs_stale_handle, dependency_download_timeout]
+    signals:
+      log_patterns:
+        - { pattern: "SlowDown", weight: 0.60 }
+        - { pattern: "500 Internal Server Error", weight: 0.55 }
+        - { pattern: "Read of object failed", weight: 0.80 }
+        - { pattern: "checksum mismatch", weight: 0.50 }
+      metric_shapes:
+        - { name: disk_read_mbps, shape: staircase, weight: 0.60 }
+        - { name: net_rx_mbps, shape: noisy_high, weight: 0.45 }
+      exit_codes: [1, 2]
+      terminal: true
+    remediation: >
+      Retry with backoff and jitter. If it recurs on the same object, the object
+      itself is suspect — verify its checksum before blaming the client.
+    runbook:
+      title: "Runbook: object store read failures"
+      body: >
+        Object stores are not filesystems: reads fail with HTTP status codes and
+        throttling, and retries are expected, not exceptional. `SlowDown` and
+        5xx are transient and retryable; a checksum mismatch is not — it means
+        the object is corrupt and retrying just wastes time. Read throughput
+        dropping in a staircase often tracks retry backoff, so it is a symptom,
+        not evidence of a slow network.
+
+  - id: nfs_stale_handle
+    name: Stale NFS handle
+    category: storage
+    difficulty: hard
+    prevalence: 1
+    distractors: [s3_read_error, disk_full, network_unreachable]
+    signals:
+      log_patterns:
+        - { pattern: "Stale file handle", weight: 1.00 }
+        - { pattern: "ESTALE", weight: 0.90 }
+        - { pattern: "NFS server", weight: 0.50 }
+      metric_shapes:
+        - { name: disk_read_mbps, shape: periodic_gap, weight: 0.65 }
+      exit_codes: [1]
+      terminal: true
+    remediation: >
+      Remount the volume and confirm the backing export was not recreated while
+      the job held an open handle. Long-running jobs that outlive an export
+      recreation will hit this.
+    runbook:
+      title: "Runbook: stale file handle on network storage"
+      body: >
+        A rare but instructive failure: the client holds a file handle to an
+        inode the server no longer has, usually because the export was recreated
+        under a running job. It looks like a read failure but the error is
+        specifically about the handle, not the data. The lesson is about
+        lifecycle coupling — long jobs and mutable backing storage are a bad
+        combination, and the fix is often operational, not in the code.
+
+  # ---------------------------------------------------------------------------
+  # SCHEDULING / INFRASTRUCTURE
+  # ---------------------------------------------------------------------------
+  - id: node_preempted
+    name: Node preempted by higher-priority work
+    category: scheduling
+    difficulty: medium
+    prevalence: 5
+    distractors: [node_evicted, process_killed_sigkill, collective_timeout]
+    signals:
+      log_patterns:
+        - { pattern: "preempted", weight: 1.00 }
+        - { pattern: "Received SIGTERM", weight: 0.70 }
+        - { pattern: "job was preempted by a higher priority", weight: 0.90 }
+      metric_shapes:
+        - { name: gpu_util_pct, shape: cliff_to_zero, weight: 0.55 }
+        - { name: host_mem_used_pct, shape: cliff_to_zero, weight: 0.50 }
+      exit_codes: [143, 137]
+      terminal: true
+    remediation: >
+      Resubmit — nothing is broken. If this recurs, request a non-preemptible
+      queue or add checkpointing so preemption costs bounded work.
+    runbook:
+      title: "Runbook: preemption is not a bug"
+      body: >
+        Exit code 143 (SIGTERM) plus a preemption message means the scheduler
+        reclaimed the node on purpose. Do not open a correctness investigation;
+        the correct action is resubmission, and the correct engineering response
+        is to checkpoint more often so the cost of preemption is bounded. The
+        trap is that SIGTERM also appears in genuine kills — the preemption
+        message and the absence of an application error are what disambiguate.
+
+  - id: node_evicted
+    name: Node evicted (health or pressure)
+    category: scheduling
+    difficulty: medium
+    prevalence: 3
+    distractors: [node_preempted, disk_full, oom_host]
+    signals:
+      log_patterns:
+        - { pattern: "Evicted", weight: 0.95 }
+        - { pattern: "The node was low on resource", weight: 0.90 }
+        - { pattern: "NodeNotReady", weight: 0.55 }
+      metric_shapes:
+        - { name: host_mem_used_pct, shape: noisy_high, weight: 0.60 }
+        - { name: disk_used_pct, shape: noisy_high, weight: 0.55 }
+      exit_codes: [137, 143]
+      terminal: true
+    remediation: >
+      Eviction is pressure-driven, so the root cause is the pressure, not the
+      eviction: find which resource was short (memory or ephemeral disk) and
+      bound the job's usage of it.
+    runbook:
+      title: "Runbook: eviction vs preemption"
+      body: >
+        Both end the job with a SIGTERM/SIGKILL and both look like "it just
+        died". Preemption is a priority decision — nothing was wrong. Eviction
+        is a pressure decision — something WAS wrong, and the node reclaimed the
+        pod because a resource got scarce. If you see eviction, keep digging for
+        which resource was pressured; treating eviction as the root cause stops
+        the investigation one layer too early.
+
+  - id: insufficient_resources
+    name: Resources unavailable in the queue
+    category: scheduling
+    difficulty: easy
+    prevalence: 4
+    distractors: [node_preempted, image_pull_failed]
+    signals:
+      log_patterns:
+        - { pattern: "Insufficient nvidia.com/gpu", weight: 1.00 }
+        - { pattern: "0/64 nodes are available", weight: 0.85 }
+        - { pattern: "Unschedulable", weight: 0.80 }
+      metric_shapes: []
+      exit_codes: [0, 1]
+      terminal: true
+    remediation: >
+      The job never started. Adjust the resource request, or raise the queue
+      quota; there is no runtime evidence to inspect because there was no run.
+    runbook:
+      title: "Runbook: unschedulable jobs"
+      body: >
+        This failure happens before the container exists, so logs are scheduler
+        messages and metrics are empty. The agent should recognise that the
+        absence of runtime telemetry is itself informative and not a data
+        problem. Common causes: requesting more GPUs than any single node has
+        (a gang-scheduling conflict), or a queue quota that cannot be satisfied.
+
+  - id: image_pull_failed
+    name: Container image pull failed
+    category: scheduling
+    difficulty: easy
+    prevalence: 3
+    distractors: [insufficient_resources, dependency_download_timeout]
+    signals:
+      log_patterns:
+        - { pattern: "ErrImagePull", weight: 1.00 }
+        - { pattern: "ImagePullBackOff", weight: 0.95 }
+        - { pattern: "manifest unknown", weight: 0.70 }
+        - { pattern: "unauthorized: authentication required", weight: 0.65 }
+      metric_shapes: []
+      exit_codes: [0, 1]
+      terminal: true
+    remediation: >
+      Verify the tag exists and the node pool can reach the registry; expired
+      image-pull credentials produce the same symptom as a missing tag.
+    runbook:
+      title: "Runbook: image pull failures"
+      body: >
+        Like unschedulable jobs, this dies before the workload starts, so there
+        is no runtime telemetry. Read the two distinct error texts carefully:
+        `manifest unknown` means the tag does not exist (a build problem), while
+        `authentication required` means the tag exists but the credentials do
+        not (a secret problem). They look identical in a dashboard and have
+        completely different owners.
+
+  # ---------------------------------------------------------------------------
+  # CODE / CONFIGURATION
+  # ---------------------------------------------------------------------------
+  - id: compile_error
+    name: Build / compile failure
+    category: code
+    difficulty: easy
+    prevalence: 4
+    distractors: [missing_dependency, config_parse_error]
+    signals:
+      log_patterns:
+        - { pattern: "SyntaxError", weight: 0.80 }
+        - { pattern: "cannot find symbol", weight: 0.85 }
+        - { pattern: "Compilation failed", weight: 0.90 }
+        - { pattern: "error: expected", weight: 0.55 }
+      metric_shapes: []
+      exit_codes: [1, 2]
+      terminal: true
+    remediation: >
+      Fix the source. Reproduce locally with the same toolchain version — a
+      compiler-version mismatch is a common second cause behind the same
+      message.
+    runbook:
+      title: "Runbook: build failures"
+      body: >
+        Deterministic and self-describing: the log names the file and line. The
+        only interesting question is whether it reproduces locally, because that
+        separates a real code defect from a toolchain/version skew. Unlike
+        near-every other scenario here, no telemetry is needed.
+
+  - id: missing_dependency
+    name: Missing runtime dependency
+    category: code
+    difficulty: easy
+    prevalence: 5
+    distractors: [compile_error, dependency_download_timeout, ckpt_incompatible]
+    signals:
+      log_patterns:
+        - { pattern: "ModuleNotFoundError", weight: 1.00 }
+        - { pattern: "ImportError", weight: 0.90 }
+        - { pattern: "No module named", weight: 0.95 }
+        - { pattern: "undefined symbol", weight: 0.70 }
+      metric_shapes: []
+      exit_codes: [1]
+      terminal: true
+    remediation: >
+      Add the dependency to the image. `undefined symbol` means the library is
+      present but ABI-incompatible, which is a different fix from a plain import
+      error.
+    runbook:
+      title: "Runbook: missing or ABI-incompatible dependencies"
+      body: >
+        Two failure modes hide behind this label. `ModuleNotFoundError` means the
+        package is absent and the fix is packaging. `undefined symbol` means the
+        package is present but was built against a different version of its
+        native dependency — reinstalling the same version will not help, and
+        that distinction is exactly the kind of judgement an experienced
+        engineer is expected to make.
+
+  - id: config_parse_error
+    name: Invalid configuration
+    category: code
+    difficulty: easy
+    prevalence: 4
+    distractors: [missing_dependency, data_schema_mismatch, ckpt_incompatible]
+    signals:
+      log_patterns:
+        - { pattern: "pydantic", weight: 0.55 }
+        - { pattern: "KeyError", weight: 0.70 }
+        - { pattern: "validation error", weight: 0.85 }
+        - { pattern: "unexpected keyword argument", weight: 0.75 }
+        - { pattern: "invalid literal for int()", weight: 0.60 }
+      metric_shapes: []
+      exit_codes: [1]
+      terminal: true
+    remediation: >
+      Validate the config against the schema before submitting. Several of these
+      errors are only detectable at parse time, so a pre-flight config lint
+      shortens the loop substantially.
+    runbook:
+      title: "Runbook: configuration errors"
+      body: >
+        Fails at startup, before any device is initialised, which is the fastest
+        and cheapest failure class. `KeyError` and validation errors usually
+        mean a config key was renamed or removed in the code but not in the
+        stored config. Worth noting for evaluation design: cheap failures like
+        this are also the easiest to over-represent in a dataset, so a realistic
+        dataset keeps them a minority.
+
+  - id: data_schema_mismatch
+    name: Input data schema mismatch
+    category: code
+    difficulty: medium
+    prevalence: 3
+    distractors: [config_parse_error, ckpt_incompatible, s3_read_error]
+    signals:
+      log_patterns:
+        - { pattern: "Column .* not found", weight: 0.85 }
+        - { pattern: "unexpected field", weight: 0.70 }
+        - { pattern: "dtype mismatch", weight: 0.65 }
+        - { pattern: "ValueError: could not convert", weight: 0.75 }
+      metric_shapes:
+        - { name: disk_read_mbps, shape: flat, weight: 0.45 }
+      exit_codes: [1]
+      terminal: true
+    remediation: >
+      Pin the dataset version the code was written against, or add an explicit
+      schema check at the dataloader boundary so the failure is named instead of
+      surfacing as a downstream conversion error.
+    runbook:
+      title: "Runbook: schema drift between code and data"
+      body: >
+        Subtle because the failure appears inside the dataloader, not at
+        startup. Schema drift is an ownership problem as much as a technical
+        one: the producer changed a column and the consumer was never told. The
+        durable fix is a contract test at the boundary, not a patch at the call
+        site.
+
+  - id: ckpt_incompatible
+    name: Checkpoint incompatible with current code
+    category: code
+    difficulty: medium
+    prevalence: 2
+    distractors: [missing_dependency, config_parse_error, data_schema_mismatch]
+    signals:
+      log_patterns:
+        - { pattern: "size mismatch for", weight: 1.00 }
+        - { pattern: "Missing key(s) in state_dict", weight: 0.95 }
+        - { pattern: "Unexpected key(s) in state_dict", weight: 0.90 }
+        - { pattern: "Error(s) in loading state_dict", weight: 0.80 }
+      metric_shapes: []
+      exit_codes: [1]
+      terminal: true
+    remediation: >
+      Align the model config with the checkpoint, or add a key-remapping step.
+      Resuming across a parallelism change requires resharding, not just a
+      load_state_dict call.
+    runbook:
+      title: "Runbook: checkpoint incompatibility"
+      body: >
+        The log always lists the offending keys, so the diagnosis is mechanical
+        once you look: missing keys mean the code expects modules the checkpoint
+        lacks (usually a config change), while unexpected keys mean the
+        checkpoint has modules the code lacks. Very common when a run resumes
+        with a different tensor-parallel degree, which changes the key names
+        themselves.
+
+  # ---------------------------------------------------------------------------
+  # RUNTIME / HANG
+  # ---------------------------------------------------------------------------
+  - id: watchdog_hang
+    name: Job hung, watchdog fired
+    category: runtime
+    difficulty: hard
+    prevalence: 4
+    distractors: [collective_timeout, hang_deadlock, process_killed_sigkill]
+    signals:
+      log_patterns:
+        # Deliberately NOT the bare word "watchdog": it occurs inside the
+        # collective-timeout line that every cascade prints, so matching on it
+        # would make this scenario look identified whenever a cascade happened.
+        # Every pattern here has to be specific enough to stand alone.
+        - { pattern: "watchdog fired", weight: 0.90 }
+        - { pattern: "heartbeat not updated", weight: 0.85 }
+        - { pattern: "no progress for", weight: 0.75 }
+        - { pattern: "last heartbeat", weight: 0.55 }
+      metric_shapes:
+        - { name: gpu_util_pct, shape: flat, weight: 0.75 }
+        - { name: net_rx_mbps, shape: flat, weight: 0.60 }
+        - { name: step_time_s, shape: spike_then_zero, weight: 0.50 }
+      exit_codes: [137, 143]
+      terminal: true
+    remediation: >
+      Hang, not crash: everything stops at once with no error text. Take a stack
+      sample before killing the job, because the traceback after the fact is
+      usually gone. Look for a wait on a resource the process does not own.
+    runbook:
+      title: "Runbook: hangs and the watchdog"
+      body: >
+        The defining evidence is FLATNESS. A crash produces a cliff; a hang
+        produces a plateau — GPU utilisation goes flat, network goes flat, step
+        time stops advancing, and the job sits until a watchdog ends it. Because
+        nothing errors, the only way to diagnose is to observe the process
+        while it is stuck (stack sample, py-spy, thread dump). This is also the
+        scenario where log retention matters most: by the time you look, the
+        interesting output has often rotated away.
+
+  - id: hang_deadlock
+    name: Deterministic deadlock between workers
+    category: runtime
+    difficulty: hard
+    prevalence: 2
+    distractors: [watchdog_hang, collective_timeout, port_conflict]
+    signals:
+      log_patterns:
+        - { pattern: "waiting for worker", weight: 0.70 }
+        - { pattern: "DataLoader worker", weight: 0.60 }
+        - { pattern: "no progress for", weight: 0.65 }
+      metric_shapes:
+        - { name: gpu_util_pct, shape: flat, weight: 0.65 }
+        - { name: host_cpu_pct, shape: flat, weight: 0.55 }
+      exit_codes: [137]
+      terminal: true
+    remediation: >
+      Reproduce with a fixed seed and smaller worker count; deadlocks that
+      disappear outside training mode are usually ordering bugs in the input
+      pipeline, not in the model.
+    runbook:
+      title: "Runbook: deadlock vs hang"
+      body: >
+        Both are flat and both get killed. The difference is determinism: a
+        deadlock reproduces at the same step every time with the same seed, so
+        it is a real bug you can bisect. A watchog hang often reproduces
+        intermittently, which usually means an external dependency stalled
+        rather than a code defect. Misclassifying one as the other sends the
+        investigation down the wrong path — one needs a code fix, the other
+        needs an infrastructure fix.
+
+  - id: process_killed_sigkill
+    name: Process killed by SIGKILL (unattributed)
+    category: runtime
+    difficulty: hard
+    prevalence: 3
+    distractors: [oom_host, node_evicted, node_preempted]
+    signals:
+      log_patterns:
+        - { pattern: "exit code 137", weight: 0.55 }
+        - { pattern: "SIGKILL", weight: 0.60 }
+      metric_shapes:
+        - { name: host_mem_used_pct, shape: flat, weight: 0.50 }
+        - { name: gpu_util_pct, shape: flat, weight: 0.45 }
+      exit_codes: [137]
+      terminal: true
+    remediation: >
+      Do not accept the exit code as the diagnosis. Check three things in order:
+      kernel OOM logs, eviction events, then preemption events. If none is
+      present, the evidence is genuinely insufficient and should be reported as
+      such.
+    runbook:
+      title: "Runbook: unattributed SIGKILL — when to stop guessing"
+      body: >
+        Exit code 137 means SIGKILL and nothing more: it is a symptom shared by
+        host OOM, eviction, and preemption. Without the kernel log or a
+        scheduler event, the correct answer is "insufficient evidence", not a
+        guess at the most common cause. This scenario exists specifically to
+        grade calibration — a system that always produces a confident root cause
+        is less useful than one that flags the cases it cannot decide, because a
+        wrong confident diagnosis costs an engineer more time than an honest
+        "unknown".
+
+  - id: port_conflict
+    name: Port already in use on restart
+    category: runtime
+    difficulty: medium
+    prevalence: 2
+    distractors: [collective_timeout, hang_deadlock, network_unreachable]
+    signals:
+      log_patterns:
+        - { pattern: "Address already in use", weight: 1.00 }
+        - { pattern: "bind() failed", weight: 0.85 }
+        - { pattern: "EADDRINUSE", weight: 0.90 }
+      metric_shapes: []
+      exit_codes: [1, 137]
+      terminal: true
+    remediation: >
+      The previous process still holds the port. Ensure the port is released on
+      shutdown (or chosen dynamically); retrying the same bind without waiting
+      just fails faster.
+    runbook:
+      title: "Runbook: port conflicts on restart"
+      body: >
+        Almost always a restart artifact rather than a first-run failure: a prior
+        process is still winding down and holding the listening socket. Useful
+        pattern to teach because it is a self-inflicted failure — the retry
+        logic, not the workload, is the bug. Watch for it in a loop of restarts,
+        where each attempt makes the next less likely to succeed.
+
+  # ---------------------------------------------------------------------------
+  # EXTERNAL DEPENDENCIES
+  # ---------------------------------------------------------------------------
+  - id: rate_limited
+    name: Upstream rate limit (429)
+    category: external
+    difficulty: medium
+    prevalence: 4
+    distractors: [upstream_service_5xx, quota_appid, s3_read_error]
+    signals:
+      log_patterns:
+        - { pattern: "429", weight: 0.80 }
+        - { pattern: "Too Many Requests", weight: 0.95 }
+        - { pattern: "rate limit", weight: 0.85 }
+        - { pattern: "retry after", weight: 0.60 }
+      metric_shapes:
+        - { name: upstream_error_rate, shape: noisy_high, weight: 0.75 }
+        - { name: upstream_qps, shape: ramp_to_ceiling, weight: 0.55 }
+      exit_codes: [1]
+      terminal: true
+    remediation: >
+      Honour the retry-after header and add jitter. If many jobs hit this
+      simultaneously, the fix is a shared client-side limiter, not more retries
+      — retries amplify the burst that caused the limit.
+    runbook:
+      title: "Runbook: upstream rate limiting"
+      body: >
+        A retry storm is the classic own-goal: the limiter throttles, every
+        client retries immediately, and the offered load goes up instead of
+        down. Correct response is backoff with jitter plus a global cap on
+        concurrent calls. Note the evaluation-side lesson: a failure that clears
+        itself on retry must not be scored the same as a failure that needs a
+        code change.
+
+  - id: upstream_service_5xx
+    name: Upstream service returning 5xx
+    category: external
+    difficulty: medium
+    prevalence: 3
+    distractors: [rate_limited, s3_read_error, dependency_download_timeout]
+    signals:
+      log_patterns:
+        - { pattern: "502 Bad Gateway", weight: 0.80 }
+        - { pattern: "503 Service Unavailable", weight: 0.85 }
+        - { pattern: "500 Internal Server Error", weight: 0.70 }
+        - { pattern: "connection reset by peer", weight: 0.60 }
+      metric_shapes:
+        - { name: upstream_error_rate, shape: cliff_to_zero, weight: 0.70 }
+      exit_codes: [1, 2]
+      terminal: true
+    remediation: >
+      Backoff and retry, then degrade. If the dependency is not on the critical
+      path, make the job tolerate its absence rather than fail.
+    runbook:
+      title: "Runbook: upstream 5xx and graceful degradation"
+      body: >
+        The interesting engineering is not the retry, it is the decision about
+        what the job needs. A metadata lookup that 5xxes should not fail a
+        twelve-hour training run; a checkpoint write that 5xxes should. Sorting
+        dependencies into critical and optional turns a hard failure into a
+        degradation, which is the difference between a robust and a brittle
+        platform.
+
+  - id: quota_appid
+    name: API application quota exhausted
+    category: external
+    difficulty: medium
+    prevalence: 2
+    distractors: [rate_limited, upstream_service_5xx]
+    signals:
+      log_patterns:
+        - { pattern: "quota exceeded for appId", weight: 1.00 }
+        - { pattern: "usage limit", weight: 0.80 }
+        - { pattern: "reached the maximum", weight: 0.65 }
+      metric_shapes:
+        - { name: upstream_error_rate, shape: cliff_to_zero, weight: 0.60 }
+      exit_codes: [1]
+      terminal: true
+    remediation: >
+      A hard ceiling that retrying cannot fix — request a quota increase or move
+      to a different credential. Distinguish from rate limiting, which is
+      transient by design.
+    runbook:
+      title: "Runbook: hard quotas vs rate limits"
+      body: >
+        Semantically similar, operationally opposite. A rate limit is a
+        short-window control and clears on its own; a quota is a hard ceiling
+        for a long period and no amount of retrying helps. Counting retries
+        against a quota failure produces a job that burns the whole window and
+        then fails anyway, which is worse than failing fast.
+
+  # ---------------------------------------------------------------------------
+  # DELIBERATE "UNKNOWABLE" CASE
+  # ---------------------------------------------------------------------------
+  - id: insufficient_evidence
+    name: No decisive evidence available
+    category: unknown
+    difficulty: hard
+    prevalence: 2
+    distractors: [process_killed_sigkill, watchdog_hang, node_evicted]
+    signals:
+      log_patterns:
+        - { pattern: "log level raised", weight: 0.0 }
+      metric_shapes: []
+      exit_codes: [137, 143]
+      terminal: true
+    remediation: >
+      Collect more evidence: re-run with debug logging, enable metrics export,
+      and enable crash dumps. Then re-open the incident rather than guessing.
+    runbook:
+      title: "Policy: when the correct answer is 'insufficient evidence'"
+      body: >
+        Some failures genuinely cannot be diagnosed from the retained telemetry.
+        The right behaviour for an assistant is to say so, name what evidence
+        would resolve it, and stop — a confident wrong root cause is more
+        expensive than an honest gap, because it sends an engineer down the
+        wrong path and burns trust in every subsequent answer. This dataset
+        deliberately includes such cases and scores refusal-to-guess as
+        correct, so that a system which always emits a confident label is
+        penalised rather than rewarded.
