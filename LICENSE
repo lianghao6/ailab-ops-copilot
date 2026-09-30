@@ -22,11 +22,8 @@ SOFTWARE.
 
 ---
 
-NOTE ON THE DATA
+数据说明
 
-All data produced by this software is synthetic and generated locally. The
-project does not read, copy, transform or derive any production data, and it
-must not be modified to do so. The failure patterns described in
-`src/ailab_ops/datagen/faults.yaml` are abstracted from generally-known
-distributed-systems failure modes; the entities, identifiers, logs and metrics
-are invented.
+本软件产生的全部数据均在本地生成，可由 --seed 完全复现。故障模式抽象自分布式
+系统的通用失效模式，公司、集群、主机、标识符、日志和指标均为合成内容；生成结果
+不包含、也不依赖任何生产数据。

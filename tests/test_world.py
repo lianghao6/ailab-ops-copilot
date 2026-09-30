@@ -1,4 +1,4 @@
-"""The generated world, and the promise that it is reproducible and synthetic."""
+"""数据集生成：可复现性、内部一致性，以及 ground truth 的隔离。"""
 
 from __future__ import annotations
 

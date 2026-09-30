@@ -48,7 +48,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 @dataclass(frozen=True)
 class Settings:
-    # ---- synthetic data ----
+    # ---- 数据生成 ----
     data_dir: Path = field(default_factory=lambda: Path(_env_str("AILAB_DATA_DIR", "./data/generated")))
     seed: int = field(default_factory=lambda: _env_int("AILAB_SEED", 20260929))
     n_jobs: int = field(default_factory=lambda: _env_int("AILAB_N_JOBS", 400))

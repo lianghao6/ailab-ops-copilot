@@ -12,7 +12,7 @@ delivered through the same tool interface:
 Why build it this way rather than hard-coding "if log contains X then answer Y":
 
 * the project must run offline, deterministically and for free, in a room of
-  learners, and must produce identical output for identical input so an
+  and must produce identical output for identical input so an
   evaluation number means something;
 * the reasoning path is visible and inspectable, so a class can argue with it
   and then change a threshold and watch the evaluation move;
@@ -529,7 +529,7 @@ class MockLLMClient:
 
 
 def _clean_log_line(message: str) -> str:
-    """Strip the synthetic decoration added by the generator.
+    """剥掉生成器附加的装饰性前缀/后缀。
 
     A real model would not need this, but the mock must not benefit from
     wrapper text that a real deployment would not have. Keeping the extractor

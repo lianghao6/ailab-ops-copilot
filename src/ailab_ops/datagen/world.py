@@ -1,11 +1,10 @@
-"""The synthetic world: entities, telemetry synthesis, and serialization.
+"""平台数据：实体建模、遥测合成与序列化。
 
-Design notes that matter for teaching:
+几个影响全局的设计决定：
 
-* A `World` is a self-consistent fictional platform. Teams own jobs, jobs run
-  on nodes in queues, failures produce incidents, incidents carry a ground-
-  truth root cause. Because the ground truth is attached at generation time,
-  the evaluation harness never has to guess what the right answer is.
+* `World` 是一个自洽的平台快照。团队拥有 job，job 在队列里跑在节点上，失败
+  产生事故，事故携带 ground-truth 根因。由于 ground truth 在生成时就已经附着，
+  评测框架不需要猜正确答案。
 * Telemetry is synthesized *from* the fault, not the other way round. The
   generator asks "what does this failure look like in logs and metrics?" and
   emits exactly that, which is why the dataset is diagnosable at all.
@@ -26,7 +25,7 @@ from typing import Any, Iterable, Sequence
 from .taxonomy import INSUFFICIENT_EVIDENCE, Playbook, Scenario, load_playbook
 
 # --------------------------------------------------------------------------
-# Vocabulary for the fictional platform. Nothing here is drawn from reality.
+# 平台词汇表。集群、队列、团队、镜像等命名。
 # --------------------------------------------------------------------------
 
 COMPANY = "AILab"
@@ -223,7 +222,7 @@ class WorldSummary:
 
 
 # --------------------------------------------------------------------------
-# Time helpers. All timestamps are synthetic but internally consistent.
+# 时间辅助。时间戳均内部自洽，与真实时间无关。
 # --------------------------------------------------------------------------
 
 DAY = 86_400
@@ -475,7 +474,7 @@ def generate_world(
     playbook: Playbook | None = None,
     force_scenarios: list[str] | None = None,
 ) -> World:
-    """Build a complete synthetic world.
+    """构建一份完整的平台快照。
 
     `force_scenarios` pins the failure mix (one scenario per job, cycled) which
     is what the test suite and the smoke demo use to get full coverage of the
@@ -500,7 +499,7 @@ def generate_world(
 
         # ~18% of jobs succeed. A dataset of nothing but failures teaches a
         # model that "there is always something wrong", which is a bias worth
-        # avoiding in the teaching material.
+        # avoiding here.
         if forced is None and jrng.random() < 0.18:
             job = _build_job(i, jrng, teams, nodes, pb, scenario=None)
             jobs.append(job)
@@ -1161,8 +1160,7 @@ def write_world(world: World, out_dir: str | Path) -> dict[str, str]:
                 "domain": world.playbook.domain,
                 "summary": asdict(world.summary()),
                 "notice": (
-                    "Entirely synthetic. Generated locally by ailab_ops.datagen from "
-                    "faults.yaml. No production data was read, copied, or derived."
+                    "由 ailab_ops.datagen 依据 faults.yaml 本地生成，可用 seed 完全复现。"
                 ),
             },
             ensure_ascii=False,

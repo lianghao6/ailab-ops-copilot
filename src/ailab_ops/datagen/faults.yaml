@@ -1,33 +1,29 @@
 # =============================================================================
-# AILab Ops Copilot — Fault Playbook (fault taxonomy)
+# AILab Ops Copilot — 故障剧本（fault taxonomy）
 # =============================================================================
-# This file is the SOURCE OF TRUTH for the whole project.
+# 本文件是整个项目的唯一真相来源（SOURCE OF TRUTH）。
 #
-# Everything downstream is derived from it:
-#   * the synthetic job generator (which failures exist, how often, how loud)
-#   * the log / metric synthesizers (what a fault looks like in telemetry)
-#   * the knowledge base builder (each scenario's `runbook` becomes a document)
-#   * the evaluation harness (each job carries its `root_cause` as ground truth)
-#   * the mock LLM reasoner (matches `signals` to reach a diagnosis)
+# 下游一切都由它派生：
+#   * job 生成器（有哪些故障、多频繁、日志多密）
+#   * 日志 / 指标合成器（一个故障在遥测里长什么样）
+#   * 知识库构建（每个场景的 `runbook` 成为一篇文档）
+#   * 评测框架（每个 job 的 `root_cause` 即 ground truth）
+#   * 离线推理器（把 `signals` 匹配到诊断结论）
 #
-# NOTHING IN THIS FILE DESCRIBES A REAL SYSTEM. Company, clusters, hosts,
-# paths, job ids and log lines are all invented. The failure *patterns* are
-# abstracted from generally-known distributed-training failure modes so the
-# exercise feels realistic, which is the whole point of a teaching dataset.
+# 故障模式抽象自分布式训练的通用失效模式，以便让数据集贴近真实运维场景；
+# 公司、集群、主机、路径、job id、日志行均为合成内容，由 --seed 决定且可复现。
 #
-# Field reference
-#   id             stable machine key, also the ground-truth label
-#   name           human-facing name (used in the UI and in reports)
-#   category       coarse bucket, drives per-category eval breakdowns
-#   root_cause     the label the agent must produce; usually == id
-#   prevalence     sampling weight (relative, normalized at generation time)
-#   difficulty     easy | medium | hard   (drives which eval split it lands in)
-#   signals        machine-usable evidence used to synthesize telemetry AND
-#                  by the mock reasoner to score candidate hypotheses
-#   distractors    scenario ids that produce overlapping evidence; used to
-#                  build "hard" cases where the agent must discriminate
-#   remediation    the fix, surfaced in the answer and in retrieval docs
-#   runbook        title/body -> becomes a knowledge-base document
+# 字段说明
+#   id             machine key，同时是 ground-truth 标签
+#   name           面向人的名称（UI 和报告里显示）
+#   category       粗粒度分类，用于按类别拆分评测
+#   root_cause     agent 需要产出的标签，通常等于 id
+#   prevalence     采样权重（相对值，生成时归一化）
+#   difficulty     easy | medium | hard（决定落在哪个评测分层）
+#   signals        机器可用的证据，既用于合成遥测，也用于推理打分
+#   distractors    证据与之重叠的干扰场景 id；用来构造 agent 必须辨别的 hard 用例
+#   remediation    修复方法，出现在答案与检索文档中
+#   runbook        title / body，会成为一篇知识库文档
 # =============================================================================
 
 meta:

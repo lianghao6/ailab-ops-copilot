@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ailab-ops-copilot"
 version = "0.1.0"
-description = "A teaching-grade, simulated enterprise AIOps copilot: diagnose failed training/eval jobs from synthetic platform data."
+description = "Enterprise AIOps copilot for training and evaluation platforms: diagnose why a job failed, from job records, logs and metrics."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "AILab Ops Copilot Contributors" }]
-keywords = ["aiops", "llm-agent", "rag", "tool-calling", "teaching", "synthetic-data"]
+keywords = ["aiops", "llm-agent", "rag", "tool-calling", "observability", "agent"]
 
 dependencies = [
     "fastapi>=0.110",

@@ -1,7 +1,7 @@
 """BM25 with field weighting (BM25F-lite).
 
-Written by hand rather than imported, for one teaching reason: every place a
-RAG pipeline silently loses recall is visible in this file. In particular:
+这里手写而不用现成库，是为了让 RAG 流水线里每一处会悄悄丢召回的地方都摆在
+明面上。具体来说：
 
 * tokenisation decides whether `gpu_mem_used_pct` matches the query term
   `gpu mem used pct`;
@@ -176,9 +176,8 @@ class BM25Index:
     def explain(self, query: str, top_k: int = 5) -> list[dict]:
         """Per-term contribution for the top documents.
 
-        Used in class to answer "why did that document win?" -- which is
-        usually "because it contains your rare term three times in its title",
-        and is much more convincing when you can show the numbers.
+        用来回答"这篇文档凭什么排第一"——通常是"因为查询里的稀有词在它标题里
+        出现了三次"。把数字摆出来，比一句结论有说服力得多。
         """
         q_terms = sorted(set(tokenize(query)))
         out = []

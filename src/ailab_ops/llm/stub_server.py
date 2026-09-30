@@ -1,15 +1,12 @@
-"""A local, OpenAI-compatible endpoint backed by the offline reasoner.
+"""本地 OpenAI 兼容端点，由离线推理器支撑。
 
-Exists for one pedagogical reason: it makes it possible to exercise the *real*
-HTTP path -- the `OpenAICompatClient`, its retry logic, its SSE parsing, the
-streaming tool-call accumulator -- with no network, no GPU and no API key. Point
-`AILAB_LLM_BACKEND=openai` at this and the project behaves exactly as it would
-against a served model, including the failure modes, which is what makes the
-concurrency controls meaningful to demonstrate.
+存在的意义：不依赖网络、GPU 和 API key，就能跑通 *真实* 的 HTTP 链路——
+`OpenAICompatClient`、它的重试逻辑、SSE 解析、流式工具调用参数拼接。把
+`AILAB_LLM_BACKEND=openai` 指向它，系统的行为与对接真实模型完全一致，包括各种
+失败模式；这正是并发控制能被有效演示的前提。
 
-It also doubles as a fault injector: `?fail_rate=0.3` makes it return 500s at a
-given rate, so a class can watch the breaker open, the ladder descend to the
-evidence-only path, and the system recover -- all deterministically.
+它同时是一个故障注入器：`?fail_rate=0.3` 让它按比例返回 500，于是可以稳定复现
+熔断器打开、降级阶梯掉到"仅证据"通道、以及系统自行恢复的完整过程。
 """
 
 from __future__ import annotations

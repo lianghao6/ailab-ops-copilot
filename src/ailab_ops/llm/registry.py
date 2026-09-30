@@ -1,4 +1,4 @@
-"""Choosing a backend from configuration."""
+"""按配置选择模型后端。"""
 
 from __future__ import annotations
 
@@ -9,12 +9,10 @@ from .openai_compat import OpenAICompatClient
 
 
 def build_llm_client(settings: Settings | None = None) -> LLMClient:
-    """Return the configured backend.
+    """返回配置指定的后端。
 
-    Unknown values fall back to the mock with a clear message rather than
-    raising, because a typo in an env var should not make the teaching project
-    fail to start -- it should make it behave in the obviously-offline way and
-    say so.
+    取值无法识别时，打一条醒目的日志并退回离线推理器，而不是抛异常：一个环境
+    变量拼错不该让整个服务起不来，它应该退回到明显离线的行为，并把这件事说出来。
     """
     s = settings or get_settings()
     backend = (s.llm_backend or "mock").strip().lower()

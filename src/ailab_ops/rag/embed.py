@@ -1,21 +1,16 @@
-"""A dependency-free "dense" encoder.
+"""零依赖的"向量"编码器。
 
-Why not a real embedding model? Two reasons, both deliberate:
+为什么不用真实 embedding 模型？两个理由，都是刻意的：
 
-1. **Offline reproducibility.** A teaching project that requires downloading a
-   model before it will start is a project that breaks in a locked-down
-   environment, and whose output changes when the model is updated. This
-   encoder is a pure function of the text and the seed.
-2. **Honesty about what is being taught.** The lesson here is *hybrid
-   retrieval* -- how to combine a lexical score with a vector score, how to
-   tune the fusion, how a dense retriever can miss an exact error string that
-   BM25 nails. That lesson is fully present with a hashed encoder, and the
-   pluggable interface below is the extension point for a real model.
+1. **离线可复现。** 一个必须先下载模型才能启动的项目，在受限网络环境下直接跑不
+   起来，而且模型一升级输出就变。本编码器是文本与种子的纯函数。
+2. **这一层要讲的是混合检索本身。** 重点在于如何把词法分数与向量分数结合、如何
+   调融合权重、以及向量检索器为什么会漏掉 BM25 一下就能命中的精确错误串。用哈希
+   编码器完全能承载这堂课；下面留出的可插拔接口，就是换成真实模型的扩展点。
 
-The technique is feature hashing (a.k.a. the hashing trick): map every token
-to a fixed-width bag of dimensions via a stable hash, weight by sublinear term
-frequency, then L2-normalise. It behaves like a bag-of-words vector space
-model with a fixed footprint, which is exactly enough for the fusion lesson.
+具体做法是特征哈希（hashing trick）：用稳定哈希把每个 token 映射到固定宽度的
+稠密向量上，按次线性词频加权，再做 L2 归一化。它的行为等价于一个固定占用空间的
+词袋向量空间模型，对融合这一课来说正好够用。
 """
 
 from __future__ import annotations

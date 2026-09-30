@@ -1,21 +1,17 @@
-"""Observability: tracing, metrics, and cost accounting.
+"""可观测性：链路追踪、指标与成本核算。
 
-Kept dependency-free and in-process on purpose. The teaching point is not
-"install Jaeger" -- it is *what you must record so that a production question
-can be answered afterwards*. Those questions are concrete:
+刻意不引入外部依赖、就放在进程内。重点不是"装一个 Jaeger"，而是 *必须记录
+哪些东西，才能在事后回答一个真实的生产问题*。这些问题都很具体：
 
-* Why was this one request slow? -> per-step spans with durations.
-* What did the model actually receive? -> recorded prompt/response token counts
-  and step kinds; optional content capture, off by default because it is both
-  large and sensitive.
-* How much is a tenant costing us right now? -> token and USD accounting keyed
-  by tenant, so it can be rate-limited on.
-* Why did the answer change? -> the tool-call trace, which is the equivalent of
-  a query plan: the same question can produce a different answer only if a
-  different set of evidence was read.
+* 这一次请求为什么慢？—— 每一步一个 span，带耗时。
+* 模型实际收到了什么？—— 记录 prompt/response 的 token 数与步类型；内容捕获
+  默认关闭，因为它既占空间又敏感。
+* 某个租户此刻花了多少钱？—— 按租户记账的 token 与美元，可直接用于限流。
+* 答案为什么变了？—— 工具调用轨迹，等价于数据库的执行计划：同一个问题只有在
+  读到的证据不同时才会给出不同的答案。
 
-Interfaces are named after OpenTelemetry concepts (trace, span, attribute) so
-that swapping this for a real SDK is a mechanical change rather than a rewrite.
+接口沿用 OpenTelemetry 的概念命名（trace / span / attribute），因此换成真实 SDK
+是机械替换，而不是重写。
 """
 
 from __future__ import annotations
@@ -252,7 +248,7 @@ class Metrics:
 def _pct(sorted_values: list[float], q: float) -> float:
     """Nearest-rank percentile. Deliberately not interpolated: for latency
     reporting, a value that was actually observed is more defensible than one
-    the reporter invented between two observations."""
+    the reporter interpolated between two observations."""
     if not sorted_values:
         return 0.0
     idx = min(int(round(q * (len(sorted_values) - 1))), len(sorted_values) - 1)

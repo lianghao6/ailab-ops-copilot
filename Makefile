@@ -6,7 +6,7 @@ export PYTHONPATH := src
 help:
 	@echo "AILab Ops Copilot — make targets"
 	@echo "  make install   Install package (editable) + dev extras"
-	@echo "  make data      Generate the synthetic dataset (deterministic)"
+	@echo "  make data      Generate the platform dataset (deterministic)"
 	@echo "  make serve     Start the API server (FastAPI + SSE)"
 	@echo "  make ask Q='...'   One-shot question against the copilot API"
 	@echo "  make demo      Offline end-to-end demo, no server needed"

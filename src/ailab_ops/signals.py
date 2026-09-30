@@ -638,8 +638,7 @@ def score_hypotheses(
 ) -> list[Hypothesis]:
     """Score every scenario in the playbook against the available evidence.
 
-    Scoring is additive and unweighted in a deliberately boring way, so that
-    every contribution can be pointed at in class:
+    打分为线性累加，刻意做得直白，这样每一项贡献都能被单独指出来：
 
         score = sum(matched log pattern weights)
               + sum(matched metric shape weights)

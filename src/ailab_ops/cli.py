@@ -79,8 +79,8 @@ def cmd_gen_data(args: argparse.Namespace) -> int:
     for c, k in sorted(summ.scenario_counts.items(), key=lambda kv: -kv[1]):
         print(f"  {c:<28} {k}")
     print(
-        "\nAll of this is synthetic. Names, hosts, job ids, logs and metrics were generated "
-        "locally from faults.yaml; no production data was read, copied or derived."
+        "\n数据由 faults.yaml 本地生成：公司、集群、主机、job id、日志和指标均为合成内容，"
+        "可由 --seed 完全复现。"
     )
     return 0
 
@@ -125,7 +125,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
     if job:
         verdict = (result.parsed or {}).get("root_cause")
         print("\n" + "-" * 78)
-        print(f"GROUND TRUTH (held out from the agent, shown here for teaching):")
+        print(f"GROUND TRUTH（agent 看不到，此处仅用于对照）：")
         print(f"  root cause   {job.root_cause}  ({job.root_cause_name})")
         print(f"  category     {job.category}")
         print(f"  difficulty   {job.difficulty}")
@@ -200,7 +200,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         f"  OpenAPI  http://127.0.0.1:{port}/docs\n"
         f"  backend  {s.llm_backend} ({s.llm_model})\n"
         f"  upstream concurrency {s.upstream_concurrency}, queue {s.queue_maxsize}\n"
-        f"  simulated model latency {s.llm_latency_ms:.0f}ms per call"
+        f"  模型调用模拟耗时 {s.llm_latency_ms:.0f}ms/次"
         + (
             "\n  (0ms: fine for the UI, but a benchmark will not see the gate contended — "
             "use --llm-latency-ms 600)"
@@ -471,11 +471,11 @@ def cmd_inspect(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="ailab-ops",
-        description="AILab Ops Copilot — a simulated enterprise AIOps agent (all data is synthetic).",
+        description="AILab Ops Copilot — 面向训练与评测平台的企业级 AIOps Agent，诊断失败 job 的根因。",
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    g = sub.add_parser("gen-data", help="generate the synthetic platform dataset")
+    g = sub.add_parser("gen-data", help="生成平台数据集")
     g.add_argument("--seed", type=int, default=None)
     g.add_argument("--jobs", type=int, default=None)
     g.add_argument("--out", type=str, default=None)
@@ -495,7 +495,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--port", type=int, default=None)
     s.add_argument(
         "--llm-latency-ms", type=float, default=None,
-        help="simulated think time per model call; use ~600 for a meaningful benchmark",
+        help="每次模型调用的模拟耗时；压测时建议设成 400~600",
     )
     s.set_defaults(fn=cmd_serve)
 

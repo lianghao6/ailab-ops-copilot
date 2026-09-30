@@ -1,19 +1,17 @@
-"""Document store with hybrid (lexical + dense) retrieval and rank fusion.
+"""文档存储：词法 + 向量混合检索，以及排序融合。
 
-The fusion step is the pedagogical centrepiece of this module. Two retrievers
-that are individually mediocre -- BM25 is brittle about wording, the hashed
-encoder is brittle about exact rare tokens -- combine into something markedly
-better, and the *way* they combine is a tunable knob with a visible effect on
-the evaluation report:
+融合是这一层的核心。两个各自有缺陷的检索器——BM25 对措辞敏感，哈希编码器对
+精确的稀有 token 不敏感——组合后的效果明显更好；而"怎么组合"是一个可调旋钮，
+它能直接影响评测结果：
 
-* `rrf`  (Reciprocal Rank Fusion) uses only ranks, so it is immune to the two
-  scorers being on incomparable scales. Robust default.
-* `linear` uses normalised scores. Usually sharper when both retrievers are
-  well calibrated, and visibly worse when one produces a runaway score.
+* `rrf`（Reciprocal Rank Fusion）只用排名，因此不受两个打分器量纲不一致的影响，
+  是稳健的默认选择。
+* `linear` 用归一化后的分数。当两个检索器都校准得当时通常更锐利，一旦某一个
+  产生离群高分则会明显变差。
 
-Chunking is included because it is where most real RAG pipelines quietly lose
-recall: a runbook split on a paragraph boundary separates the symptom from the
-fix, and neither chunk then ranks well for a query mentioning both.
+分块（chunking）也在这里，因为大多数真实 RAG 流水线正是在这里悄悄丢掉召回：
+一份 runbook 若按段落切开，症状和修复方法被分到两块，那么一个同时提到两者的
+查询，两块都排不上来。
 """
 
 from __future__ import annotations
@@ -364,8 +362,7 @@ class HybridRetriever:
     def explain(self, query: str, top_k: int = 5) -> str:
         """Human-readable per-retriever comparison.
 
-        Used in the demo and in class to show, concretely, a query where the
-        lexical and dense retrievers disagree and the fusion beats both.
+        用来具体展示一个查询：词法和向量检索器给出不同结果，而融合优于两者。
         """
         r = self.search(query, top_k=top_k)
         lines = [f"query: {query!r}  fusion={r.fusion}  candidates={r.n_candidates}"]

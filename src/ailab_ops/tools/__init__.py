@@ -101,7 +101,7 @@ class Tool:
             res = ToolResult(ok=False, error=f"{type(exc).__name__}: {exc}")
         # Latency is simulated rather than slept: the benchmark measures
         # throughput of the *architecture*, and sleeping would make the test
-        # suite slow for no pedagogical gain. The number is still reported so
+        # suite slow for no gain. The number is still reported so
         # the accounting is honest.
         res.latency_ms = self.simulated_latency_ms + (time.perf_counter() - t0) * 1000.0
         self.total_latency_ms += res.latency_ms

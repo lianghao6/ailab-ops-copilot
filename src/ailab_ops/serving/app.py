@@ -6,11 +6,11 @@ Endpoints, and why each exists:
     POST /v1/diagnose/stream   the same, as server-sent events
     GET  /v1/health            liveness/readiness, including saturation signals
     GET  /v1/stats             counters, gate, cache, sessions, tool usage
-    GET  /v1/jobs              browse the world (for teaching and for the UI)
+    GET  /v1/jobs              browse the world (for the UI)
     GET  /v1/jobs/{job_id}     one job, ground truth withheld
-    GET  /                     a small single-file UI for classroom demos
+    GET  /                     a small single-file web UI
 
-Notes on the API design that are worth arguing about in class:
+几处值得推敲的 API 设计取舍：
 
 * **`/v1/health` distinguishes liveness from saturation.** Returning 200 while
   every upstream slot is busy is correct for liveness and useless for
@@ -22,8 +22,8 @@ Notes on the API design that are worth arguing about in class:
   storm that the gate exists to prevent.
 * **Identity comes from the request body in this build.** In production it
   comes from a verified header the gateway sets; the code marks the seam
-  (`resolve_identity`) rather than pretending the body is trustworthy. It is a
-  teaching project, and quietly shipping an auth bypass would be a bad lesson.
+  (`resolve_identity`) rather than quietly trusting the body. The deployment is
+  deliberately simulated, and quietly shipping an auth bypass would be wrong.
 """
 
 from __future__ import annotations
@@ -91,7 +91,7 @@ def resolve_identity(request: Request, body_tenant: str, body_user: str) -> tupl
     """Where identity comes from.
 
     In this build it is the request body, which is fine because the whole
-    system is a teaching simulation with no real tenants. In production this is
+    build has no real tenants. In production this is
     the function you replace with header verification against your gateway's
     signed identity, and the reason it is a named function rather than inline
     is so that the substitution is a one-line change with an obvious home.
@@ -128,8 +128,7 @@ def create_app(runtime: Runtime | None = None) -> FastAPI:
         title="AILab Ops Copilot",
         version="0.1.0",
         description=(
-            "A simulated enterprise AIOps assistant that diagnoses failed training and "
-            "evaluation jobs. All data is synthetic and generated locally."
+            "面向训练与评测平台的企业级 AIOps 助手，诊断失败 job 的根因。"
         ),
         lifespan=lifespan,
     )
@@ -231,7 +230,7 @@ def create_app(runtime: Runtime | None = None) -> FastAPI:
 
     @app.post("/v1/admin/force-degrade")
     async def force_degrade(request: Request, on: bool = True) -> JSONResponse:
-        """Fault injection: pretend the model service is unavailable.
+        """故障注入：把模型服务置为不可用。
 
         Exposed as an endpoint rather than a config flag so a class can flip it
         while watching the UI, which is how the degradation ladder becomes
@@ -387,9 +386,8 @@ def create_app(runtime: Runtime | None = None) -> FastAPI:
                 "boot_ms": round(rt.boot_ms, 1),
                 "source": rt.source,
                 "summary": rt.world.summary().__dict__,
-                "disclaimer": (
-                    "All entities, jobs, logs and metrics are synthetic and generated locally "
-                    "from faults.yaml. No production data was read, copied or derived."
+                "provenance": (
+                    "全部实体、job、日志和指标均由 faults.yaml 本地生成，可由 seed 完全复现。"
                 ),
             }
         )
@@ -428,7 +426,7 @@ async def _queue_reaper(s: CopilotService) -> None:
 
 
 # --------------------------------------------------------------------------
-# A single-file UI for classroom demos. No build step, no dependencies.
+# A single-file web UI. No build step, no dependencies.
 # --------------------------------------------------------------------------
 
 
