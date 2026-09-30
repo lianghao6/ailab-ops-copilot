@@ -345,29 +345,65 @@ latency              p50 4ms  p90 5ms  p99 7ms
 
 ## 项目结构
 
+每个包的 `__init__.py` 只做 re-export 并声明 `__all__`，实现都在具名模块里。
+
 ```
 src/ailab_ops/
   config.py        配置，全部走环境变量，带离线默认值
-  signals.py       ★ 形态分类、级联规则、假设打分
+  signals.py       ★ 形态分类、级联规则、假设打分（880 行）
   runtime.py       唯一的对象图，被 server / CLI / eval / bench 共用
+  cli.py           所有入口
 
   datagen/         平台数据生成
-    faults.yaml    ★ 真相来源：29 个场景
+    faults.yaml    ★ 真相来源：29 个场景（932 行）
     taxonomy.py    加载与校验
-    world.py       实体建模 + 遥测合成 + 序列化
+    world.py       实体建模 + 遥测合成 + 序列化（1225 行）
 
   rag/             BM25F + 哈希向量检索、RRF 融合
-    bm25.py  embed.py  store.py  kb.py
+    bm25.py           词法检索（带字段权重）
+    embed.py          零依赖的哈希编码器
+    store.py          文档存储、分块、排序融合
+    kb.py             知识库构建（runbook + 平台文档）
 
-  tools/           7 个只读工具、输出上限、类型化错误
-  llm/             后端协议、离线推理器、OpenAI 兼容客户端
-    mock.py  openai_compat.py  stub_server.py
-  agent/           ★ 有界的工具调用循环（约 200 行）
-  serving/         FastAPI、SSE、闸门、限流、缓存、降级
-  obs/             链路追踪、指标、成本核算
-  eval/            准确率、校准、混淆对、成本
-  bench/           并发压测
-  cli.py           所有入口
+  tools/           只读工具层
+    registry.py      Tool / ToolRegistry / ToolResult
+    builtin.py       7 个内置工具 + build_registry
+
+  llm/             模型适配层
+    base.py          后端协议与消息类型
+    mock.py          离线推理器（确定性）
+    openai_compat.py 任何 OpenAI 兼容端点
+    stub_server.py   本地 HTTP stub，可注入故障
+    registry.py      按配置选后端
+
+  agent/           ★ 有界的工具调用循环
+    loop.py          Agent / AgentStep / AgentResult（346 行）
+    parsing.py       把模型输出解析成结构化诊断
+
+  serving/         HTTP 与稳定性
+    app.py           FastAPI + SSE
+    service.py       请求流水线（身份 → 限流 → 缓存 → 降级 → 闸门 → agent）
+    gate.py          上游准入控制
+    limits.py        四种独立的限流与预算
+    cache.py         语义缓存 + 熔断器 + 降级阶梯
+    static/          单文件 Web UI
+
+  obs/             可观测性
+    tracing.py       Span / Trace / Tracer
+    metrics.py       指标、成本核算、METRICS
+
+  eval/            评测
+    models.py        CaseResult / EvalReport
+    cases.py         分层采样
+    runner.py        串行执行与聚合
+    reporting.py     落盘
+
+  bench/           压测
+    models.py        ClientResult / BenchReport
+    mix.py           问题集构造
+    scenarios.py     场景配置（限制画像 / 闸门容量）
+    runner.py        施压与观测
+    reporting.py     报告落盘
 
 tests/             159 个测试：playbook、world、rag、signals、tools、agent、
                    serving、eval —— 外加一条端到端准确率下限

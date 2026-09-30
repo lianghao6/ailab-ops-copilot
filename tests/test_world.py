@@ -121,14 +121,21 @@ def test_ground_truth_file_is_separate_from_the_browsable_data():
     agent's good behaviour."""
     from pathlib import Path
 
-    root = Path(__file__).resolve().parents[1] / "src" / "ailab_ops" / "tools"
-    src = (root / "__init__.py").read_text(encoding="utf-8")
-    assert "_job_view" in src
-    view_fn = src.split("def _job_view")[1].split("\ndef ")[0]
-    for leaked in ("root_cause", "confounders", "is_insufficient_evidence", "difficulty"):
-        assert leaked not in view_fn, (
-            f"_job_view exposes {leaked!r}, which the agent must not see"
-        )
+    # Locate `_job_view` by searching the package rather than by hard-coding a
+    # path: the tool layer has been split across modules before and will be
+    # again, and a test that fails on a file move is a test that gets deleted.
+    tools_dir = Path(__file__).resolve().parents[1] / "src" / "ailab_ops" / "tools"
+    sources = {p.name: p.read_text(encoding="utf-8") for p in tools_dir.glob("*.py")}
+    holders = [name for name, s in sources.items() if "def _job_view" in s]
+    assert holders, f"_job_view not found anywhere in {sorted(sources)}"
+
+    for name in holders:
+        view_fn = sources[name].split("def _job_view")[1].split("\ndef ")[0]
+        for leaked in ("root_cause", "confounders", "is_insufficient_evidence", "difficulty"):
+            assert leaked not in view_fn, (
+                f"_job_view in {name} exposes {leaked!r}, which the agent must not see"
+            )
+
     # And the ground truth is written to its own file, not mixed into jobs.jsonl.
     world_src = (Path(__file__).resolve().parents[1] / "src" / "ailab_ops" / "datagen"
                  / "world.py").read_text(encoding="utf-8")
