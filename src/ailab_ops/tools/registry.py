@@ -9,9 +9,12 @@ from __future__ import annotations
 
 from ..llm.base import ToolSpec
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal, TYPE_CHECKING
 from typing import Callable
 import time
+
+if TYPE_CHECKING:
+    from ..evidence.models import Evidence
 
 @dataclass
 class ToolResult:
@@ -21,11 +24,14 @@ class ToolResult:
     hint: str | None = None
     latency_ms: float = 0.0
     truncated: bool = False
+    evidence_items: list[Evidence] | None = None
 
     def to_dict(self) -> dict:
         d: dict[str, Any] = {"ok": self.ok}
         if self.ok:
             d["data"] = self.data
+            if self.evidence_items is not None:
+                d["evidence_items"] = [item.to_dict() for item in self.evidence_items]
         else:
             d["error"] = self.error
             if self.hint:
@@ -40,17 +46,41 @@ class ToolResult:
 
         return json.dumps(self.to_dict(), ensure_ascii=False, default=str)
 
-@dataclass
+@dataclass(init=False)
 class Tool:
     name: str
     description: str
     parameters: dict[str, Any]
     fn: Callable[..., ToolResult]
     simulated_latency_ms: float = 40.0
-    read_only: bool = True
+    kind: Literal["read", "action"] = "read"
+    sensitivity: str = "internal"
+    idempotent: bool = True
     calls: int = 0
     errors: int = 0
     total_latency_ms: float = 0.0
+
+    def __init__(self, name: str, description: str, parameters: dict[str, Any],
+                 fn: Callable[..., ToolResult], simulated_latency_ms: float = 40.0,
+                 read_only: bool | None = None, calls: int = 0, errors: int = 0,
+                 total_latency_ms: float = 0.0, *, kind: Literal["read", "action"] | None = None,
+                 sensitivity: str = "internal", idempotent: bool | None = None):
+        # Keep the original positional order, including the legacy keyword.
+        if kind is not None and kind not in {"read", "action"}:
+            raise ValueError("kind must be read or action")
+        if read_only is not None and kind is not None and read_only != (kind == "read"):
+            raise ValueError("read_only conflicts with kind")
+        self.name, self.description, self.parameters, self.fn = name, description, parameters, fn
+        self.simulated_latency_ms = simulated_latency_ms
+        self.kind = kind or ("action" if read_only is False else "read")
+        self.sensitivity = sensitivity
+        self.idempotent = self.kind == "read" if idempotent is None else idempotent
+        self.calls, self.errors, self.total_latency_ms = calls, errors, total_latency_ms
+
+    @property
+    def read_only(self) -> bool:
+        """Compatibility view of the authoritative permission metadata."""
+        return self.kind == "read"
 
     def spec(self) -> ToolSpec:
         return ToolSpec(name=self.name, description=self.description, parameters=self.parameters)
