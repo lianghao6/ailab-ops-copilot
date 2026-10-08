@@ -281,6 +281,8 @@ def chapter_four(tmp_path_factory):
 
 def test_chapter_four_publishes_current_security_contract(chapter_four):
     module, reader, text = chapter_four
+    assert "报告的 recommendations" in re.sub(r"\s+", " ", text)
+    assert "报告的 remediation" not in text
     assert reader.metadata.title == "第 4 课 · 安全边界与人工审批"
     for concept in ("最小权限", "提示注入", "人工编写回放", "authored replay", "敏感字段",
                     "allow_read", "require_approval", "deny", "annotate_incident",

@@ -119,3 +119,24 @@ def test_seven_final_books_pass_independent_publication_audit():
     result = qa().inspect_publication(ROOT / "docs/course/pdf")
     assert len(result["artifacts"]) == 7
     assert result["ok"], result["issues"]
+
+
+def test_publication_audit_rejects_missing_font_distribution_licenses(tmp_path):
+    assert callable(getattr(qa(), "inspect_font_licenses", None)), "missing distribution-license audit"
+    issues = qa().inspect_font_licenses(tmp_path)
+    assert any("OFL-NotoSansSC.txt" in issue and "missing" in issue for issue in issues)
+    assert any("OFL-JetBrainsMono.txt" in issue and "missing" in issue for issue in issues)
+
+
+def test_publication_audit_rejects_truncated_font_license(tmp_path):
+    assert callable(getattr(qa(), "inspect_font_licenses", None)), "missing distribution-license audit"
+    for name in ("OFL-NotoSansSC.txt", "OFL-JetBrainsMono.txt"):
+        (tmp_path / name).write_text("SIL OPEN FONT LICENSE Version 1.1\n")
+    issues = qa().inspect_font_licenses(tmp_path)
+    assert len(issues) == 2
+    assert all("incomplete or changed" in issue for issue in issues)
+
+
+def test_repository_ships_verified_complete_font_licenses():
+    assert callable(getattr(qa(), "inspect_font_licenses", None)), "missing distribution-license audit"
+    assert qa().inspect_font_licenses(ROOT / "docs/course/fonts") == []

@@ -157,7 +157,7 @@ LESSON = Lesson(4, "安全边界与人工审批", "从 GPU assert 报告走到�
     Source("src/ailab_ops/investigation/orchestrator.py", "InvestigationOrchestrator.request_action"),
 
     H1("四、把建议变成待审批快照", anchor="proposal"),
-    P("报告的 remediation 是建议文字，不自动变成 ApprovalRequest。用户读完报告后提交"
+    P("报告的 recommendations 是建议文字，不自动变成 ApprovalRequest。用户读完报告后提交"
       " proposal，携带工具名、参数和证据。通过策略后，服务生成 request_id 并保存 pending"
       "快照。此时调查阶段切换为 awaiting_approval，读取循环不会继续偷偷执行动作。"),
     P("审批快照冻结的是这一次提案，不能把一次批准理解为对后续任意参数的批准。创建时"

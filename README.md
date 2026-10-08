@@ -140,4 +140,8 @@ V1 工具统一使用 `ailab-ops legacy <command>`，Make 对应 `legacy-*`，�
 
 默认 `/` 提供 V2 调查工作台，与 V2 API 和 CLI 共用运行时；V1 界面仅保留在 legacy 入口。非 editable 安装需部署仓库的 data/v2 资产并适配数据根路径，目前推荐源代码或 editable 安装。
 
-MIT，见 LICENSE。
+项目代码与项目文档使用 [MIT 许可证](LICENSE)。随仓库分发的 Noto Sans SC 与
+JetBrains Mono 字体分别使用 SIL Open Font License 1.1，不适用项目 MIT：
+[Noto Sans SC 完整许可](docs/course/fonts/OFL-NotoSansSC.txt)、
+[JetBrains Mono 完整许可](docs/course/fonts/OFL-JetBrainsMono.txt)。
+字体资产、版权、许可来源与修改说明见 [字体说明](docs/course/fonts/README.md)。

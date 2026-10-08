@@ -29,7 +29,8 @@ python3 scripts/qa_course_pdfs.py         # 七份 PDF 的自动出版检查
 PDF 时间戳或文件字节相同。
 
 出版 QA 检查 A4、页数、实际使用字体的嵌入与 ToUnicode、可抽取文本、空白页、
-关键事实、源码路径/符号、过时口播措辞、文字边界和孤立末尾标题。
+关键事实、源码路径/符号、过时口播措辞、文字边界、孤立末尾标题及随仓库
+分发字体完整许可的来源校验摘要。
 它不能证明自然语言主张正确，也不能替代图表和代码的视觉抽查。
 安装可选的 `pypdfium2` 与 Pillow 后，可在临时目录渲染每页及每二十页的联系表：
 
@@ -79,6 +80,14 @@ LESSON = Lesson(1, "从 LLM 到 Agent", "围绕一次 GPU assert 调查", blocks
 历史 V1 实验不得当作当前 V2 能力。
 
 ## 字体来源与长读字重
+
+项目代码与文档的 [MIT 许可](../../LICENSE) 不覆盖第三方字体资产。
+`NotoSansSC.ttf` 与静态 `NotoSansSC-Regular.ttf` 使用
+[完整 Noto Sans SC OFL 1.1 许可及版权声明](fonts/OFL-NotoSansSC.txt)；
+`JetBrainsMono.ttf` 与 `JetBrainsMono-Bold.ttf` 使用
+[完整 JetBrains Mono OFL 1.1 许可及版权声明](fonts/OFL-JetBrainsMono.txt)。
+上游出处、随仓库资产范围和静态实例修改记录见 [字体说明](fonts/README.md)。
+复制分发字体时应同时保留这些许可文件；PDF 文档不因使用字体而被改为 OFL 许可。
 
 仓库原 `fonts/NotoSansSC.ttf` 是可变字体，ReportLab 不应用其变化轴，默认嵌入
 Thin。出版使用同一字体生成的静态 `NotoSansSC-Regular.ttf`（wght=400）。

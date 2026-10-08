@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import importlib
 import json
 from pathlib import Path
@@ -30,10 +31,31 @@ FACTS = {
     1: ("从LLM到Agent", "case-gpu-assert", "get_case_snapshot", "人工编写回放", "结构化输出"),
     2: ("让调查过程可控", "budget_exhausted", "duplicate_call", "自然结束", "transport"),
     3: ("RAG、证据链与可信回答", "4000", "truncated", "V1", "PYTHONHASHSEED=0"),
-    4: ("安全边界与人工审批", "get_case_snapshot", "simulated", "execution_replayed", "未经认证"),
+    4: ("安全边界与人工审批", "get_case_snapshot", "recommendations", "simulated", "execution_replayed", "未经认证"),
     5: ("如何评测一个Agent", "null", "置信度分段", "九次", "语义"),
     6: ("从Demo到企业级服务", "每秒请求数", "令牌桶", "突发容量", "Retry-After", "进程内"),
 }
+
+# Complete authoritative OFL snapshots retrieved on 2026-10-08; normalization
+# removes only line-ending/trailing whitespace. Attribution lives beside files.
+FONT_LICENSE_DIGESTS = {
+    "OFL-NotoSansSC.txt": "babcfe66c8a098b2fa279bc724a3a342f8124f77ce18941fbcc1bbb39823cded",
+    "OFL-JetBrainsMono.txt": "c1ab7c666206842a02b35b30770dac0d7a10156ed401c9defc3f02a754d89e90",
+}
+
+
+def inspect_font_licenses(directory: Path):
+    """Reject missing/truncated/changed distributed copyright and OFL text."""
+    issues = []
+    for name, digest in FONT_LICENSE_DIGESTS.items():
+        path = directory / name
+        if not path.is_file():
+            issues.append(f"missing font distribution license: {name}")
+            continue
+        text = "\n".join(line.rstrip() for line in path.read_text(encoding="utf-8").splitlines()) + "\n"
+        if hashlib.sha256(text.encode("utf-8")).hexdigest() != digest:
+            issues.append(f"font license {name}: incomplete or changed authoritative text")
+    return issues
 
 
 def compact(value):
@@ -145,6 +167,7 @@ def inspect_publication(directory: Path) -> dict:
                  for n, name in enumerate(FILENAMES, 1)]
     issues = [f"{Path(a['path']).name}: {issue}" for a in artifacts for issue in a["issues"]]
     issues.extend(inspect_sources())
+    issues.extend(inspect_font_licenses(COURSE / "fonts"))
     for artifact in artifacts:
         if artifact["pages"] < 3:
             issues.append(f"{Path(artifact['path']).name}: implausibly short publication")
