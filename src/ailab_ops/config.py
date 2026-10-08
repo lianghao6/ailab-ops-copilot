@@ -54,6 +54,9 @@ class Settings:
     n_jobs: int = field(default_factory=lambda: _env_int("AILAB_N_JOBS", 400))
 
     # ---- llm backend ----
+    model_mode: str = field(default_factory=lambda: _env_str("AILAB_MODEL_MODE", "replay"))
+    model_replay_path: Path = field(default_factory=lambda: Path(
+        _env_str("AILAB_MODEL_REPLAY_PATH", "data/v2/replays/gpu-assert.jsonl")))
     llm_backend: str = field(default_factory=lambda: _env_str("AILAB_LLM_BACKEND", "mock"))
     llm_model: str = field(default_factory=lambda: _env_str("AILAB_LLM_MODEL", "mock-diagnoser-v1"))
     llm_base_url: str = field(default_factory=lambda: _env_str("AILAB_LLM_BASE_URL", "http://127.0.0.1:8001/v1"))
