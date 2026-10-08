@@ -148,6 +148,7 @@ setImmediate(async () => {
   assert(!created.some(element => ["img", "script", "iframe"].includes(element.tag)));
   assert.deepStrictEqual(Object.keys(saved).sort(), ["sessionId", "tenantId"]);
   workspace.state.tenantId = "tenant&other/中文";
+  elements["tenant-id"].value = workspace.state.tenantId;
   assert.strictEqual(workspace.sessionPath("id/with?query#fragment"), "/v2/investigations/id%2Fwith%3Fquery%23fragment?tenant_id=tenant%26other%2F%E4%B8%AD%E6%96%87");
   // Superseding a restore must abort it, and ignore a response even if a
   // transport finishes after abort. The current tenant remains authoritative.
@@ -164,6 +165,49 @@ setImmediate(async () => {
   global.fetch = async () => ({ok: false, status: 422, json: async () => ({error: {kind: "replay_miss"}})});
   await workspace.loadSession("miss");
   assert.strictEqual(elements["workspace-status"].dataset.state, "replay_miss");
+  // Every entry validates the visible identity independently of change events.
+  // Invalidating it also cancels an existing request and prevents late data
+  // from repopulating the previous tenant's presentation.
+  for (const entry of ["create", "restore", "change"]) {
+    elements["tenant-id"].value = "tenant-01";
+    workspace.state.tenantId = "tenant-01";
+    let pendingRequest;
+    global.fetch = (path, options) => new Promise(resolve => { pendingRequest = {options, resolve}; });
+    const oldRestore = workspace.loadSession("old-tenant-session");
+    workspace.render(input.detail);
+    elements["tenant-id"].value = " \t \n ";
+    let calls = 0;
+    global.fetch = async () => { calls += 1; return {ok: true, status: 200, json: async () => input.detail}; };
+    if (entry === "create") await elements["intake-form"].handlers.submit({preventDefault() {}});
+    else if (entry === "restore") {
+      elements["session-id"].value = "requested-session";
+      await elements["restore-form"].handlers.submit({preventDefault() {}});
+    } else elements["tenant-id"].handlers.change();
+    await new Promise(setImmediate);
+    assert.strictEqual(calls, 0, `Blank tenant ${entry} must not fetch`);
+    assert.strictEqual(pendingRequest.options.signal.aborted, true);
+    assert.strictEqual(workspace.state.detail, null);
+    assert.strictEqual(workspace.state.sessionId, "");
+    assert.strictEqual(workspace.state.tenantId, "");
+    assert.strictEqual(elements["workspace-status"].dataset.state, "error");
+    assert(elements["workspace-status"].textContent.includes("租户"));
+    pendingRequest.resolve({ok: true, status: 200, json: async () => input.detail});
+    await oldRestore;
+    assert.strictEqual(workspace.state.detail, null);
+  }
+  // Surrounding whitespace is normalized consistently for both request types,
+  // even when no change event has run after the user edits the input.
+  for (const entry of ["create", "restore"]) {
+    elements["tenant-id"].value = "  tenant-next  ";
+    let observed;
+    global.fetch = async (path, options) => { observed = {path, options}; return {ok: true, status: 200, json: async () => input.detail}; };
+    if (entry === "create") await elements["intake-form"].handlers.submit({preventDefault() {}});
+    else await workspace.loadSession("requested-session");
+    assert.strictEqual(elements["tenant-id"].value, "tenant-next");
+    assert.strictEqual(workspace.state.tenantId, "tenant-next");
+    if (entry === "create") assert.strictEqual(JSON.parse(observed.options.body).tenant_id, "tenant-next");
+    else assert(observed.path.endsWith("?tenant_id=tenant-next"));
+  }
 });
 '''
     completed = subprocess.run([node, "-e", harness], input=json.dumps(payload), text=True, capture_output=True)

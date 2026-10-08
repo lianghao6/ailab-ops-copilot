@@ -27,6 +27,31 @@
   function json(value) { return JSON.stringify(value ?? {}, null, 2); }
   function percent(value) { return Number.isFinite(value) ? `${Math.round(value * 100)}%` : "未给出"; }
 
+  function normalizeTenant(value) {
+    const tenantId = typeof value === "string" ? value.trim() : "";
+    return tenantId.length > 0 && tenantId.length <= 100 ? tenantId : "";
+  }
+
+  function confirmTenant() {
+    const input = byId("tenant-id");
+    const tenantId = normalizeTenant(input.value);
+    input.setAttribute("aria-invalid", String(!tenantId));
+    if (tenantId) input.value = tenantId;
+    if (tenantId && tenantId === state.tenantId) return tenantId;
+    if (activeController) activeController.abort();
+    generation += 1;
+    state.tenantId = tenantId;
+    state.sessionId = "";
+    byId("session-id").value = "";
+    persistContext();
+    render(null);
+    banner(state.modelMode);
+    status(tenantId ? "empty" : "error", tenantId
+      ? "已切换租户。选择案例或恢复当前租户的会话。"
+      : "租户标识不能为空白，且不得超过 100 个字符。请填写有效租户后重试。");
+    return tenantId;
+  }
+
   function persistContext() {
     try {
       localStorage.setItem(storageKey, JSON.stringify({ tenantId: state.tenantId, sessionId: state.sessionId }));
@@ -36,8 +61,8 @@
   function readContext() {
     try {
       const saved = JSON.parse(localStorage.getItem(storageKey) || "null");
-      if (saved && typeof saved.tenantId === "string" && saved.tenantId.length > 0 && saved.tenantId.length <= 100) {
-        state.tenantId = saved.tenantId;
+      if (saved && normalizeTenant(saved.tenantId)) {
+        state.tenantId = normalizeTenant(saved.tenantId);
         if (typeof saved.sessionId === "string" && saved.sessionId.length <= 200) state.sessionId = saved.sessionId;
       }
     } catch (_) { /* A malformed saved context must not prevent intake. */ }
@@ -265,7 +290,7 @@
   }
 
   async function loadSession(sessionId) {
-    if (!sessionId) return;
+    if (!confirmTenant() || !sessionId) return;
     const operation = begin("正在恢复调查与引用证据…");
     render(null);
     try {
@@ -282,7 +307,7 @@
 
   byId("intake-form").addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (!["replay", "online"].includes(state.modelMode)) return;
+    if (!confirmTenant() || !["replay", "online"].includes(state.modelMode)) return;
     const body = { tenant_id: state.tenantId, case_id: state.modelMode === "online" ? byId("case-input").value.trim() : byId("case-select").value };
     if (byId("question").value.trim()) body.question = byId("question").value.trim();
     const operation = begin("正在调查：收集证据、验证假设与整理报告…");
@@ -303,26 +328,14 @@
 
   byId("restore-form").addEventListener("submit", (event) => {
     event.preventDefault();
-    loadSession(byId("session-id").value.trim());
+    return loadSession(byId("session-id").value.trim());
   });
 
-  byId("tenant-id").addEventListener("change", () => {
-    const tenantId = byId("tenant-id").value.trim();
-    if (!tenantId || tenantId === state.tenantId) return;
-    if (activeController) activeController.abort();
-    generation += 1;
-    state.tenantId = tenantId;
-    state.sessionId = "";
-    byId("session-id").value = "";
-    persistContext();
-    render(null);
-    banner(state.modelMode);
-    status("empty", "已切换租户。选择案例或恢复当前租户的会话。");
-  });
+  byId("tenant-id").addEventListener("change", confirmTenant);
 
   // The action workflow can subscribe to ailab:investigation and use this
   // presentation boundary without duplicating session ownership or DOM sinks.
-  window.AILabWorkspace = { state, request, sessionPath, loadSession, render, status, node, citations, ApiError };
+  window.AILabWorkspace = { state, request, sessionPath, loadSession, render, status, node, citations, ApiError, confirmTenant };
 
   async function boot() {
     readContext();
