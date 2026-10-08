@@ -61,6 +61,9 @@ class _Action(_Strict):
     tool: str = Field(min_length=1)
     arguments: dict[str, Any]
     reason: str = Field(min_length=1)
+    risk: str = Field(min_length=1)
+    rollback: str = Field(min_length=1)
+    evidence_ids: list[str] = Field(min_length=1)
 
 
 class ActionControl(_Strict):

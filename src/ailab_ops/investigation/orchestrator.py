@@ -14,14 +14,16 @@ import json
 from typing import Any, Callable
 from uuid import uuid4
 
+from ailab_ops.approvals import ApprovalError, ApprovalRequest, ApprovalService, ApprovalStore
 from ailab_ops.evidence import Evidence, EvidenceStore, ValidationIssue, validate_report
 from ailab_ops.llm.base import ChatMessage, FinishReason, ToolCall
 from ailab_ops.models.protocol import ModelBackendError, ModelGateway
+from ailab_ops.policy import PolicyContext, PolicyEngine
 from ailab_ops.tools.registry import ToolRegistry, ToolResult
 
 from .models import Budget, Hypothesis, InvestigationPhase, InvestigationReport, InvestigationState
 from .parsing import (ActionControl, ControlError, HypothesesControl, PlanControl, ReportControl,
-                      parse_arguments, parse_control, validate_arguments)
+                      parse_arguments, parse_control)
 from .prompts import SYSTEM_PROMPT
 
 
@@ -38,13 +40,15 @@ class InvestigationSession:
     completed_calls: dict[str, list[str]] = field(default_factory=dict)
     report_failures: int = 0
     proposed_action: dict[str, Any] | None = None
+    approval_request_id: str | None = None
 
 
 class InvestigationOrchestrator:
     def __init__(self, gateway: ModelGateway, registry: ToolRegistry,
                  evidence_store: EvidenceStore | None = None, *,
                  persist: Callable[[InvestigationState], None] | None = None,
-                 now: Callable[[], datetime] | None = None):
+                 now: Callable[[], datetime] | None = None,
+                 approval_store: ApprovalStore | None = None):
         self.gateway = gateway
         self.registry = registry
         # The legacy injection is an empty, single-use test seam, not historical
@@ -60,6 +64,8 @@ class InvestigationOrchestrator:
         # or events are retained here; durable storage can use the callback.
         self.states: dict[str, InvestigationState] = {}
         self._evidence_archive: dict[str, dict[str, Evidence]] = {}
+        self.policy = PolicyEngine(registry, evidence_lookup=self.get_evidence)
+        self.approval_service = ApprovalService(self.policy, approval_store, now=self._now)
 
     def start(self, question: str, *, case_id: str | None, budget: Budget) -> InvestigationState:
         """Create and persist intake for callers advancing a session one step at a time."""
@@ -154,6 +160,54 @@ class InvestigationOrchestrator:
             return None
         return session.evidence_store.get(evidence_id)
 
+    def request_action(self, session_id: str, proposal: dict[str, Any]) -> ApprovalRequest:
+        """Request approval against a completed, cited diagnosis.
+
+        Report generation terminates the read loop. This explicit boundary lets
+        callers propose an action after inspecting its retained diagnosis.
+        """
+        with self.approval_service.store._lock:
+            state = self.states.get(session_id)
+            if (state is None or state.phase != InvestigationPhase.COMPLETED or state.report is None
+                    or session_id in self.sessions):
+                raise ApprovalError("A completed diagnosis is required before proposing an action")
+            store = EvidenceStore()
+            for evidence in self._evidence_archive.get(session_id, {}).values():
+                store.add(deepcopy(evidence))
+            if (validate_report(state.report, store) or not any(c.material for c in state.report.claims)
+                    or any(eid not in state.evidence_ids for c in state.report.claims for eid in c.evidence_ids)):
+                raise ApprovalError("A valid cited diagnosis is required")
+            try:
+                control = parse_control(json.dumps({"type": "proposed_action", "action": proposal}, allow_nan=False))
+            except (ControlError, TypeError, ValueError) as exc:
+                raise ApprovalError(str(exc)) from None
+            session = InvestigationSession(deepcopy(state), store, [])
+            return self._propose_action(session, control.action.model_dump())
+
+    def _propose_action(self, session: InvestigationSession, action: dict[str, Any]) -> ApprovalRequest:
+        if session.state.report is None:
+            raise ApprovalError("Complete a valid diagnosis before proposing an action")
+        context = PolicyContext(session.state.session_id, action["reason"], action["risk"],
+                                action["rollback"], tuple(action["evidence_ids"]))
+        request = self.approval_service.create(context, action["tool"], action["arguments"])
+        session.proposed_action = deepcopy(action)
+        session.approval_request_id = request.request_id
+        session.state.phase = InvestigationPhase.AWAITING_APPROVAL
+        session.state.stop_reason = None
+        self.approval_service.watch(request.request_id,
+                                    lambda changed: self._approval_changed(session, changed))
+        self.sessions[session.state.session_id] = session
+        self._save(session, "action_proposed")
+        return request
+
+    def _approval_changed(self, session: InvestigationSession, request: ApprovalRequest) -> None:
+        if request.status not in {"executed", "rejected", "expired", "failed"}:
+            return
+        session.state.phase = InvestigationPhase.COMPLETED
+        session.state.stop_reason = None if request.status == "executed" else "approval_" + request.status
+        self._save(session, "action_" + request.status)
+        self.sessions.pop(session.state.session_id, None)
+
     def _save(self, session: InvestigationSession, event: str) -> None:
         session.events.append({"event": event, "step": session.state.budget.steps_used})
         self.states[session.state.session_id] = deepcopy(session.state)
@@ -194,10 +248,11 @@ class InvestigationOrchestrator:
         tool = self.registry.get(call.name)
         try:
             arguments = parse_arguments(call)
-            if tool is not None:
-                if tool.kind != "read":
+            decision = self.policy.authorize(PolicyContext(session.state.session_id), tool, arguments)
+            if decision.outcome != "allow_read":
+                if tool is not None and tool.kind == "action":
                     raise ControlError("action tools require a proposed_action and approval")
-                validate_arguments(arguments, tool.parameters)
+                raise ControlError(decision.reason)
         except ControlError as exc:
             self._tool_feedback(session, call, {"ok": False, "error": str(exc),
                 "hint": "Repair the arguments using the tool schema; actions must be proposed."})
@@ -249,6 +304,8 @@ class InvestigationOrchestrator:
                 self._stop(session, "report_validation_failed")
             elif isinstance(raw, dict) and raw.get("type") == "report":
                 self._report_issues(session, [ValidationIssue("invalid_report", "report", str(exc))])
+            elif isinstance(raw, dict) and raw.get("type") == "proposed_action":
+                self._feedback(session, "invalid_action", str(exc))
             else:
                 self._feedback(session, "invalid_control", str(exc))
             return
@@ -273,17 +330,10 @@ class InvestigationOrchestrator:
             self._report(session, InvestigationReport.from_dict(control.report.model_dump()))
         elif isinstance(control, ActionControl):
             action = control.action.model_dump()
-            tool = self.registry.get(action["tool"])
             try:
-                if tool is None or tool.kind != "action":
-                    raise ControlError("Proposed action must name a registered action tool")
-                validate_arguments(action["arguments"], tool.parameters)
-            except ControlError as exc:
+                self._propose_action(session, action)
+            except ApprovalError as exc:
                 self._feedback(session, "invalid_action", str(exc))
-                return
-            session.proposed_action = action
-            state.phase = InvestigationPhase.AWAITING_APPROVAL
-            self._save(session, "action_proposed")
 
     def _report(self, session: InvestigationSession, report: InvestigationReport) -> None:
         state = session.state

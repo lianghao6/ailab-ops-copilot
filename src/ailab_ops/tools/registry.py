@@ -86,6 +86,11 @@ class Tool:
         return ToolSpec(name=self.name, description=self.description, parameters=self.parameters)
 
     def __call__(self, **kwargs: Any) -> ToolResult:
+        # Action Tool.fn is never an execution path in this build. Approvals
+        # execute declarative simulations through ApprovalService only.
+        if self.kind == "action":
+            return ToolResult(ok=False, error="approval_required",
+                              hint="Propose the action and obtain explicit approval for simulation.")
         t0 = time.perf_counter()
         self.calls += 1
         try:
@@ -145,7 +150,11 @@ class ToolRegistry:
             )
             self.call_log.append({"step": step, "tool": name, "arguments": arguments, "ok": False, "error": res.error})
             return res
-        res = tool(**arguments)
+        if tool.kind == "action":
+            res = ToolResult(ok=False, error="approval_required",
+                             hint="Propose the action and obtain explicit approval for simulation.")
+        else:
+            res = tool(**arguments)
         self.call_log.append(
             {
                 "step": step,

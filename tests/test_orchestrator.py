@@ -193,12 +193,17 @@ def test_action_tool_is_never_executed_and_is_excluded_from_model_tools():
 
 
 def test_proposed_action_is_retained_for_approval_without_execution():
-    gateway = ScriptedGateway(control("proposed_action", action={"tool": "restart", "arguments": {"job_id": "job-1"}, "reason": "Recover worker"}))
+    gateway = ScriptedGateway(call(), cited_report)
     tools = registry()
     tools.register(Tool("restart", "Restart", tools.get("read_logs").parameters, lambda **kw: pytest.fail("Action executed"), kind="action"))
     orchestrator, state = run(gateway, tools)
-    assert state.phase == InvestigationPhase.AWAITING_APPROVAL and not tools.call_log
+    request = orchestrator.request_action(state.session_id, {
+        "tool": "restart", "arguments": {"job_id": "job-1"}, "reason": "Recover worker",
+        "risk": "Lose unsaved state", "rollback": "Restore checkpoint", "evidence_ids": state.evidence_ids})
+    assert orchestrator.states[state.session_id].phase == InvestigationPhase.AWAITING_APPROVAL
+    assert [entry["tool"] for entry in tools.call_log] == ["read_logs"]
     assert orchestrator.sessions[state.session_id].proposed_action["tool"] == "restart"
+    assert request.status == "pending" and tools.get("restart").calls == 0
 
 
 def test_legacy_read_only_constructor_and_new_kind_enforce_same_permission():
@@ -369,10 +374,13 @@ def test_model_can_discover_action_schema_for_a_proposal_without_callable_action
         advertised = intake["available_actions"][0]
         assert advertised["name"] == "restart" and advertised["sensitivity"] == "sensitive"
         assert advertised["parameters"]["required"] == ["job_id"]
-        return control("proposed_action", action={"tool": advertised["name"], "arguments": {"job_id": "job-1"}, "reason": "Recover"})
-    gateway = ScriptedGateway(propose)
-    _, state = run(gateway, tools)
-    assert state.phase == InvestigationPhase.AWAITING_APPROVAL
+        return call()
+    gateway = ScriptedGateway(propose, cited_report)
+    orchestrator, state = run(gateway, tools)
+    orchestrator.request_action(state.session_id, {
+        "tool": "restart", "arguments": {"job_id": "job-1"}, "reason": "Recover",
+        "risk": "Lose unsaved state", "rollback": "Restore checkpoint", "evidence_ids": state.evidence_ids})
+    assert orchestrator.states[state.session_id].phase == InvestigationPhase.AWAITING_APPROVAL
     assert [spec.name for spec in gateway.requests[0][1]] == ["read_logs", "read_metrics"]
 
 
