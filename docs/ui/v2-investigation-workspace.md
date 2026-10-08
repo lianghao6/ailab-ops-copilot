@@ -114,6 +114,36 @@ NODE_PATH="$qa_dir/node_modules" node scripts/qa_v2_workspace.cjs \
 
 最终专项 25 passed；全套 489 passed、1 个上述 legacy skip。真实浏览器脚本 exit 0，JS 语法和 diff whitespace 检查通过。
 
+## Tab/Shift+Tab 与 200% 等价重排：fix round2
+
+沿用 `HeadlessChrome/92.0.4512.0` 和相同临时依赖，扩展 QA 脚本至桌面/窄屏的 100% 与 200% 等价重排。200% 采用 Puppeteer 的 CDP device metrics：把 **CSS layout viewport 的宽、高各缩为原来一半**，再设置 `deviceScaleFactor=2` 保持截图输出的物理像素尺寸。桌面由 1440×900 改为 720×450 CSS px，窄屏由 390×844 改为 195×422 CSS px；读取的 `innerWidth` 确实变为 720 和 195。这是等价的页面放大/reflow 验证，不是操作浏览器菜单缩放；单独改变 deviceScaleFactor 而不减小 CSS 视口不会产生这项重排。
+
+代表状态 intake、completed 和 pending 在每种组合执行完整键盘循环：仅在开头设置 skip link 焦点，之后逐次真实发送 Tab，遍历当前可用控件和链接直至回到 skip link；再用 Shift keyDown + Tab + Shift keyUp 逐次反向遍历。每步检查 activeElement、可见/未禁用及 focus-visible 计算轮廓 solid，反向序列与正向序列逆序严格一致；未发现焦点陷阱。统计不含浏览器边界 body 焦点，包含 skip link；展开明细中的链接和控件按当时可见状态参与循环。
+
+| 物理输出视口 / 等价缩放 | CSS 视口 | intake 焦点数 | completed 焦点数 | pending 焦点数 |
+|---|---|---:|---:|---:|
+| 1440×900 / 100% | 1440×900 | 12 | 69 | 74 |
+| 1440×900 / 200% | 720×450 | 7 | 64 | 69 |
+| 390×844 / 100% | 390×844 | 7 | 64 | 69 |
+| 390×844 / 200% | 195×422 | 7 | 64 | 69 |
+
+主要顺序已核对：skip link → wordmark → tenant-id → case-select → question → start-button → 恢复明细 summary。桌面 100% 另有 5 个可见目录链接；重排为窄屏后它们隐藏，焦点数相应减少。completed 的行动表单按操作者、工具、参数、引用、理由、风险、回滚、提交排列。pending 审批卡按批准确认框、批准按钮、拒绝原因、拒绝按钮排列，之后可到操作者输入与审计明细。Shift+Tab 可从末尾逐项返回入口。200% 下同样以 Enter/Space 实际提出、拒绝、批准、单独执行提案，控件没有被隐藏或挤出页面。
+
+四种组合均重新捕获全部七状态，共 28 次主状态检查；每次 console/pageerror=0，页面 scrollWidth=innerWidth，body 内可见元素的右侧越界列表为空。200% 桌面七状态为 720/720，200% 窄屏七状态为 195/195。图片和结果在 `/tmp/v2-ui-browser-qa.8ecfAB/round2/`，缩放截图名为 `1440-200pct-{state}.png` 与 `390-200pct-{state}.png`，其余后缀与 round1 相同；`findings.json` 包含 12 组正反序列。已查看修复后的 200% 窄屏 intake、报告和 pending 行动面板截图。临时文件未提交。
+
+发现并修复：195 CSS px 时页头的版本标记沿不换行的 flex 行溢出，页面 scrollWidth=256。实际浏览器宽度断言先失败，新增窄屏页头静态合同也先失败。补 `max-width:360px` 页头 flex-wrap 和品牌 white-space:normal 后，版本标记正常换到下一行，完整四组合复测通过。该规则也改善正常极窄视口；390px 正常截图保持原布局。
+
+本轮可重跑命令（先按 round1 启动本地 replay 服务）：
+
+```bash
+NODE_PATH=/tmp/v2-ui-browser-qa.8ecfAB/node_modules \
+FONTCONFIG_FILE=/tmp/v2-ui-browser-qa.8ecfAB/fonts.conf \
+FONTCONFIG_PATH=/tmp/v2-ui-browser-qa.8ecfAB \
+node scripts/qa_v2_workspace.cjs http://127.0.0.1:8098 /tmp/chromium /tmp/v2-ui-browser-qa.8ecfAB/round2
+```
+
+真实浏览器脚本 exit 0；专项 26 passed；全套 490 passed、1 个原有 legacy skip。JS 语法与 diff whitespace 检查通过。
+
 ## 剩余验证边界与教材截图
 
-真实浏览器验证范围限于上述 Chromium 92、两种视口和本地 replay；尚未验证其他浏览器、屏幕阅读器播报、完整 Tab/Shift+Tab 顺序、对比度测量、200% 缩放或在线模型。此次截图是 QA 证据，教材裁图与最终版式仍应在排版阶段确认。会话 ID、时间和延迟每次运行不同，不能把它们当作像素确定性基准；教材使用 investigating/loading 图时应标明受控等待。
+真实浏览器验证范围限于上述 Chromium 92、两种输出视口（含 200% 等价重排）和本地 replay；尚未验证其他浏览器、屏幕阅读器播报、对比度测量或在线模型。Tab/Shift+Tab 完整循环覆盖 intake、completed、pending 的当前展开状态，不声称覆盖每个可能的明细展开组合；缩放检查未操作浏览器菜单。此次截图是 QA 证据，教材裁图与最终版式仍应在排版阶段确认。会话 ID、时间和延迟每次运行不同，不能把它们当作像素确定性基准；教材使用 investigating/loading 图时应标明受控等待。

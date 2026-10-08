@@ -107,6 +107,14 @@ def test_wide_desktop_intake_retains_a_readable_page_gutter(assets):
         assert declarations(wide[1], ".intake-column").get("padding-left") not in {"0", "0px", "0rem"}
 
 
+def test_zoomed_narrow_header_wraps_brand_and_edition_instead_of_overflowing(assets):
+    _, css = assets
+    small = css.split("@media (max-width: 360px)", 1)
+    assert len(small) == 2, "200% narrow viewport needs a header reflow contract"
+    assert declarations(small[1], ".masthead").get("flex-wrap") == "wrap"
+    assert declarations(small[1], ".wordmark").get("white-space") == "normal"
+
+
 def test_seven_workspace_states_keep_native_controls_and_evidence_targets(browser_payload):
     node = shutil.which("node")
     if not node:

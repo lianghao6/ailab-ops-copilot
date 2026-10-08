@@ -14,7 +14,12 @@ const findings = [];
     env:process.env});
   try {
     console.log(await browser.version());
-    for (const viewport of [{width:1440,height:900},{width:390,height:844}]) {
+    const displays = [{width:1440,height:900},{width:390,height:844}];
+    for (const {display,zoom} of displays.flatMap(display=>[1,2].map(zoom=>({display,zoom})))) {
+      // Halve the CSS layout viewport at 200%, then render at twice the pixel
+      // density. Pixel density alone would not trigger responsive reflow.
+      const viewport = {width:display.width/zoom,height:display.height/zoom,deviceScaleFactor:zoom};
+      const prefix = `${display.width}${zoom===2 ? "-200pct" : ""}`;
       const page = await browser.newPage();
       await page.setViewport(viewport);
       await page.evaluateOnNewDocument(()=>localStorage.removeItem("ailab-ops-v2-context"));
@@ -31,22 +36,66 @@ const findings = [];
       await page.goto(base, {waitUntil:"networkidle0"});
       await page.waitForFunction(()=>window.AILabWorkspace.state.modelMode==="replay");
       assert.strictEqual(await page.evaluate(()=>window.AILabWorkspace.state.detail),null,"intake uses clean browser context");
+      const tabCycle=async name=>{
+        const identify=()=>page.evaluate(()=>{
+          const e=document.activeElement;
+          if(e===document.body) return {name:"browser-boundary"};
+          const name=e.id || e.dataset.confirm || e.dataset.action || e.dataset.reason ||
+            (e.classList.contains("skip-link") ? "skip-link" : e.classList.contains("wordmark") ? "wordmark" :
+              `${e.tagName}:${e.getAttribute("href") || e.textContent.trim().slice(0,24)}`);
+          return {name,outline:getComputedStyle(e).outlineStyle,visible:e.getClientRects().length>0,disabled:e.disabled===true};
+        });
+        await page.focus(".skip-link");
+        const forward=["skip-link"];
+        for(let step=0;step<500;step++) {
+          await page.keyboard.press("Tab");
+          const target=await identify();
+          if(target.name==="browser-boundary") continue;
+          assert(target.visible && !target.disabled && target.outline==="solid",`${name} keyboard focus visible: ${target.name}`);
+          if(target.name==="skip-link") break;
+          forward.push(target.name);
+          assert(step<499,`${name} Tab must leave controls and complete a cycle`);
+        }
+        assert.deepStrictEqual(forward.slice(0,7),["skip-link","wordmark","tenant-id","case-select","question","start-button","SUMMARY:恢复已有调查"]);
+        if(name==="completed") assert.deepStrictEqual(forward.filter(id=>id.startsWith("proposal-")),[
+          "proposal-tool","proposal-arguments","proposal-evidence","proposal-reason","proposal-risk","proposal-rollback","proposal-button"]);
+        if(name==="pending") {
+          const review=forward.filter(id=>id==="approve" || id==="reject" || id.startsWith("reject-"));
+          assert.deepStrictEqual(review,["approve","approve",review[2],"reject"]);
+          assert(review[2].startsWith("reject-"));
+          assert(forward.includes("action-actor"));
+        }
+        const reverse=[];
+        for(let step=0;step<500;step++) {
+          await page.keyboard.down("Shift");
+          await page.keyboard.press("Tab");
+          await page.keyboard.up("Shift");
+          const target=await identify();
+          if(target.name==="browser-boundary") continue;
+          assert(target.visible && !target.disabled && target.outline==="solid",`${name} reverse keyboard focus visible: ${target.name}`);
+          reverse.push(target.name);
+          if(target.name==="skip-link") break;
+          assert(step<499,`${name} Shift+Tab must complete a cycle`);
+        }
+        assert.deepStrictEqual(reverse,forward.slice(1).reverse().concat("skip-link"),`${name} reverse order/no focus trap`);
+        findings.push({display,zoom,tabState:name,forward,reverse,noFocusTrap:true});
+      };
       const capture=async name=>{
         await page.evaluate(()=>window.scrollTo(0,0));
-        await page.screenshot({path:`${output}/${viewport.width}-${name}.png`,fullPage:true});
-        await page.screenshot({path:`${output}/${viewport.width}-${name}-viewport.png`});
-        if (["pending","rejected","executed"].includes(name)) await (await page.$("#action-panel")).screenshot({path:`${output}/${viewport.width}-${name}-action.png`});
-        if (["completed","insufficient"].includes(name)) await (await page.$("#cited-report")).screenshot({path:`${output}/${viewport.width}-${name}-report.png`});
+        await page.screenshot({path:`${output}/${prefix}-${name}.png`,fullPage:true});
+        await page.screenshot({path:`${output}/${prefix}-${name}-viewport.png`});
+        if (["pending","rejected","executed"].includes(name)) await (await page.$("#action-panel")).screenshot({path:`${output}/${prefix}-${name}-action.png`});
+        if (["completed","insufficient"].includes(name)) await (await page.$("#cited-report")).screenshot({path:`${output}/${prefix}-${name}-report.png`});
         const measurement=await page.evaluate(()=>({
           viewport:innerWidth,scroll:document.documentElement.scrollWidth,
           h1:document.querySelectorAll("h1").length,
           mode:document.getElementById("mode-banner").textContent.trim(),
           status:document.getElementById("workspace-status").textContent.trim(),
           phase:window.AILabWorkspace.state.detail?.phase || "intake",
-          overflow:[...document.querySelectorAll("main *")].filter(e=>e.getClientRects().length && e.getBoundingClientRect().right>innerWidth+1)
+          overflow:[...document.querySelectorAll("body *")].filter(e=>e.getClientRects().length && e.getBoundingClientRect().right>innerWidth+1)
             .slice(0,10).map(e=>({tag:e.tagName,id:e.id,class:e.className,right:e.getBoundingClientRect().right})),
         }));
-        findings.push({viewport,state:name,...measurement,consoleErrors:[...errors]});
+        findings.push({display,zoom,state:name,...measurement,consoleErrors:[...errors]});
         console.log(JSON.stringify(findings[findings.length-1]));
         assert(measurement.scroll<=viewport.width+1,`${viewport.width} ${name} page horizontal overflow`);
         assert.strictEqual(measurement.h1,1);
@@ -54,7 +103,7 @@ const findings = [];
       };
       await capture("intake");
       assert(await page.$eval("h1",e=>e.getBoundingClientRect().left)>=24,"intake retains a readable viewport gutter");
-      await page.keyboard.press("Tab");
+      await tabCycle("intake");
       assert.strictEqual(await page.evaluate(()=>document.activeElement.className),"skip-link");
       assert.strictEqual(await page.evaluate(()=>getComputedStyle(document.activeElement).outlineStyle),"solid");
       await page.keyboard.press("Enter");
@@ -72,6 +121,7 @@ const findings = [];
       await held.continue(); held=null;
       await page.waitForFunction(()=>window.AILabWorkspace.state.detail?.phase==="completed" && !window.AILabWorkspace.state.busy);
       await capture("completed");
+      await tabCycle("completed");
       const submit=async ()=>{
         await page.evaluate(()=>{
           const fields={"proposal-tool":"annotate_incident","proposal-arguments":JSON.stringify({case_id:"case-gpu-assert",note:"Browser QA"}),
@@ -84,6 +134,7 @@ const findings = [];
       };
       await submit();
       await capture("pending");
+      await tabCycle("pending");
       assert.strictEqual(await page.$("[data-action=execute]"),null);
       assert(await page.$eval("#approval-list details",e=>e.open));
       await page.$eval("#action-actor",e=>{e.value="browser-reviewer";});
@@ -105,7 +156,8 @@ const findings = [];
       assert(await page.$eval("#approval-list",e=>e.textContent.includes("模拟执行结果")));
       assert.strictEqual(await page.$("[data-action=execute]"),null);
       await page.select("#case-select","case-insufficient-evidence");
-      await page.click("#start-button");
+      await page.focus("#start-button");
+      await page.keyboard.press("Enter");
       await page.waitForFunction(()=>window.AILabWorkspace.state.busy);
       await held.continue(); held=null;
       await page.waitForFunction(()=>window.AILabWorkspace.state.detail?.case_id==="case-insufficient-evidence" && !window.AILabWorkspace.state.busy);
@@ -121,7 +173,7 @@ const findings = [];
         return {viewport:innerWidth,scroll:document.documentElement.scrollWidth};
       });
       assert(stress.scroll<=viewport.width+1,"long text horizontal overflow");
-      findings.push({viewport,stress,reducedMotion:true,keyboard:{skip:true,disclosure:true,proposal:true,reject:true,approve:true,execute:true}});
+      findings.push({display,zoom,viewport,stress,reducedMotion:true,keyboard:{skip:true,disclosure:true,proposal:true,reject:true,approve:true,execute:true}});
       await page.close();
     }
   } finally {
