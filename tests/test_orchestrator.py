@@ -368,3 +368,105 @@ def test_model_can_discover_action_schema_for_a_proposal_without_callable_action
     _, state = run(gateway, tools)
     assert state.phase == InvestigationPhase.AWAITING_APPROVAL
     assert [spec.name for spec in gateway.requests[0][1]] == ["read_logs", "read_metrics"]
+
+
+@pytest.mark.parametrize("interleaved", [False, True])
+def test_injected_store_cannot_replace_current_observation_with_previous_session_metadata(interleaved):
+    tools = registry()
+    observations = iter([
+        Evidence("read_logs", {}, "Old observation", "same excerpt",
+                 observed_time_range=("old-start", "old-end"), metadata={"private_context": "A"}),
+        Evidence("read_logs", {}, "New observation", "same excerpt",
+                 observed_time_range=("new-start", "new-end"), metadata={"private_context": "B"}),
+    ])
+    tools.get("read_logs").fn = lambda job_id: ToolResult(True, evidence_items=[next(observations)])
+    injected = EvidenceStore()
+    gateway = ScriptedGateway(*(call(), call(), cited_report, cited_report) if interleaved else
+                              (call(), cited_report, call(), cited_report))
+    orchestrator = InvestigationOrchestrator(gateway, tools, injected, now=lambda: NOW)
+    if interleaved:
+        a = orchestrator.start("A", case_id=None, budget=budget())
+        b = orchestrator.start("B", case_id=None, budget=budget())
+        orchestrator.advance(a)
+        orchestrator.advance(b)
+        orchestrator.advance(a)
+        orchestrator.advance(b)
+    else:
+        a = orchestrator.run("A", case_id=None, budget=budget())
+        b = orchestrator.run("B", case_id=None, budget=budget())
+    assert a.evidence_ids == b.evidence_ids  # Same identity, different observation metadata.
+    current = json.loads(gateway.requests[-1][0][-1].content)["evidence_items"][0]
+    assert current["summary"] == "New observation"
+    assert current["observed_time_range"] == ["new-start", "new-end"]
+    assert current["metadata"] == {"private_context": "B"}
+    assert injected.get(a.evidence_ids[0]) is None
+
+
+@pytest.mark.parametrize("interleaved", [False, True])
+def test_completed_reports_keep_resolvable_isolated_evidence_after_chat_cleanup(interleaved):
+    tools = registry()
+    observations = iter([
+        Evidence("read_logs", {}, "A", "same excerpt", metadata={"session": "A"}),
+        Evidence("read_logs", {}, "B", "same excerpt", metadata={"session": "B"}),
+    ])
+    tools.get("read_logs").fn = lambda job_id: ToolResult(True, evidence_items=[next(observations)])
+    gateway = ScriptedGateway(*(call(), call(), cited_report, cited_report) if interleaved else
+                              (call(), cited_report, call(), cited_report))
+    orchestrator = InvestigationOrchestrator(gateway, tools, now=lambda: NOW)
+    if interleaved:
+        a = orchestrator.start("A", case_id=None, budget=budget())
+        b = orchestrator.start("B", case_id=None, budget=budget())
+        for state in (a, b, a, b):
+            orchestrator.advance(state)
+    else:
+        a = orchestrator.run("A", case_id=None, budget=budget())
+        b = orchestrator.run("B", case_id=None, budget=budget())
+    assert not orchestrator.sessions
+    for state, label in ((a, "A"), (b, "B")):
+        for claim in state.report.claims:
+            for evidence_id in claim.evidence_ids:
+                observation = orchestrator.get_evidence(state.session_id, evidence_id)
+                assert observation.summary == label and observation.metadata == {"session": label}
+                observation.metadata["session"] = "tampered"
+                assert orchestrator.get_evidence(state.session_id, evidence_id).metadata == {"session": label}
+    # Mutating the compatibility pointer cannot mutate archived observations.
+    evidence_id = b.evidence_ids[0]
+    orchestrator.evidence_store._evidence[evidence_id].metadata["session"] = "tampered"
+    assert orchestrator.get_evidence(b.session_id, evidence_id).metadata == {"session": "B"}
+    assert orchestrator.get_evidence(a.session_id, "ev-unknown") is None
+    with pytest.raises(InvestigationSessionError):
+        orchestrator.get_evidence("unknown-session", evidence_id)
+
+
+def test_stopped_partial_evidence_is_archived_and_available_during_terminal_persist():
+    captured = []
+    orchestrator = None
+    def persist(state):
+        if state.phase == InvestigationPhase.STOPPED:
+            captured.append(orchestrator.get_evidence(state.session_id, state.evidence_ids[0]))
+    orchestrator = InvestigationOrchestrator(ScriptedGateway(call()), registry(), now=lambda: NOW, persist=persist)
+    state = orchestrator.run("Partial", case_id=None, budget=budget(max_steps=1))
+    orchestrator.start("Next", case_id=None, budget=budget())
+    assert state.session_id not in orchestrator.sessions
+    assert captured[0].source_tool == "read_logs"
+    assert orchestrator.get_evidence(state.session_id, state.evidence_ids[0]) == captured[0]
+
+
+@pytest.mark.parametrize("finish", [FinishReason.LENGTH, FinishReason.ERROR])
+def test_incomplete_native_calls_are_not_executed_or_sent_as_unpaired_transcript(finish):
+    incomplete = LLMResponse(tool_calls=[ToolCall("partial", "read_logs", {}, '{"job_id":')], finish_reason=finish)
+    tools = registry()
+    gateway = ScriptedGateway(incomplete, call("read_metrics"), cited_report)
+    _, state = run(gateway, tools)
+    assert state.phase == InvestigationPhase.COMPLETED
+    assert [entry["tool"] for entry in tools.call_log] == ["read_metrics"]
+    for messages, _, _ in gateway.requests[1:]:
+        unmatched = []
+        for message in messages:
+            if message.role == "assistant":
+                unmatched.extend(tool.id for tool in message.tool_calls)
+            elif message.role == "tool":
+                unmatched.remove(message.tool_call_id)
+        assert unmatched == []
+        assert not any(tool.id == "partial" for message in messages for tool in message.tool_calls)
+    assert json.loads(gateway.requests[1][0][-1].content)["error"] == "incomplete_response"

@@ -47,20 +47,24 @@ class InvestigationOrchestrator:
                  now: Callable[[], datetime] | None = None):
         self.gateway = gateway
         self.registry = registry
-        self._injected_store = evidence_store
-        self.evidence_store = evidence_store if evidence_store is not None else EvidenceStore()
+        # The legacy injection seeds only the first session, by value. Never
+        # write back to it or reuse its first-observation identities across runs.
+        self._initial_store = deepcopy(evidence_store) if evidence_store is not None else None
+        self.evidence_store = EvidenceStore()
         self._persist = persist
         self._now = now or (lambda: datetime.now(timezone.utc))
         self.sessions: dict[str, InvestigationSession] = {}
         # Latest immutable-by-copy state snapshots. No terminal chat transcripts
         # or events are retained here; durable storage can use the callback.
         self.states: dict[str, InvestigationState] = {}
+        self._evidence_archive: dict[str, dict[str, Evidence]] = {}
 
     def start(self, question: str, *, case_id: str | None, budget: Budget) -> InvestigationState:
         """Create and persist intake for callers advancing a session one step at a time."""
         state = InvestigationState(uuid4().hex, question, deepcopy(budget), case_id=case_id,
                                    mode=self.gateway.mode)
-        store = self._injected_store if self._injected_store is not None else EvidenceStore()
+        store = self._initial_store if self._initial_store is not None else EvidenceStore()
+        self._initial_store = None
         self.evidence_store = store
         actions = []
         for name in self.registry.names:
@@ -107,12 +111,16 @@ class InvestigationOrchestrator:
         self._save(session, "model_received")
         if self._stop_if_exhausted(session, include_steps=False):
             return state
-        session.messages.append(ChatMessage("assistant", response.content, tool_calls=deepcopy(response.tool_calls)))
         if response.finish_reason in {FinishReason.ERROR, FinishReason.LENGTH}:
             if session.report_failures:
                 return self._stop(session, "report_validation_failed")
+            # Incomplete calls are neither executed nor replayed to the model:
+            # retaining them would require matching tool results in the transcript.
             self._feedback(session, "incomplete_response", "Return a complete control object or tool call.")
-        elif response.tool_calls:
+            self._stop_if_exhausted(session)
+            return state
+        session.messages.append(ChatMessage("assistant", response.content, tool_calls=deepcopy(response.tool_calls)))
+        if response.tool_calls:
             if session.report_failures:
                 return self._stop(session, "report_validation_failed")
             for call in response.tool_calls:
@@ -128,9 +136,30 @@ class InvestigationOrchestrator:
             self._stop_if_exhausted(session)
         return state
 
+    def get_evidence(self, session_id: str, evidence_id: str) -> Evidence | None:
+        """Read an isolated observation from an active or archived session.
+
+        Results are independent copies. Unknown evidence returns None; unknown
+        sessions raise a typed error. Terminal archives retain observations only,
+        never the model conversation or events.
+        """
+        if session_id in self._evidence_archive:
+            return deepcopy(self._evidence_archive[session_id].get(evidence_id))
+        session = self.sessions.get(session_id)
+        if session is None:
+            raise InvestigationSessionError("Unknown investigation session")
+        if evidence_id not in session.state.evidence_ids:
+            return None
+        return session.evidence_store.get(evidence_id)
+
     def _save(self, session: InvestigationSession, event: str) -> None:
         session.events.append({"event": event, "step": session.state.budget.steps_used})
         self.states[session.state.session_id] = deepcopy(session.state)
+        if session.state.phase in {InvestigationPhase.COMPLETED, InvestigationPhase.STOPPED}:
+            self._evidence_archive[session.state.session_id] = {
+                evidence_id: session.evidence_store.get(evidence_id)
+                for evidence_id in session.state.evidence_ids
+            }
         if self._persist is not None:
             self._persist(deepcopy(session.state))
 
