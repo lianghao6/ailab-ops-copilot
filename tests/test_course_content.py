@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import importlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -159,3 +160,112 @@ def test_chapter_two_budget_measurements_match_real_replay(chapter_two, name, ar
               "evidence_count": len(observed["evidence"]),
               "has_report": observed["report"] is not None}
     assert actual == module.BUDGET_OBSERVATIONS[name]
+
+
+@pytest.fixture(scope="module")
+def chapter_three(tmp_path_factory):
+    module = importlib.import_module("lessons.l3")
+    path = deck.build(module.LESSON, tmp_path_factory.mktemp("chapter-three") / "lesson-3.pdf")
+    reader = PdfReader(path)
+    return module, reader, "\n".join(page.extract_text() for page in reader.pages)
+
+
+def test_chapter_three_publishes_v2_evidence_route_and_scope(chapter_three):
+    module, reader, text = chapter_three
+    assert reader.metadata.title == "第 3 课 · RAG、证据链与可信回答"
+    for concept in ("观察后检索", "重排", "证据不足", "人工编写回放", "authored replay",
+                    "词法", "向量", "混合", "主张", "语义", "V1 基线", "生成日志",
+                    "truncated", "complete", "missing_citation", "unknown_evidence",
+                    "duplicate_citation", "课后阅读"):
+        assert concept in text
+    for stale in ("口语化讲稿", "小面试", "实操 1", "286 条真实失败日志", "等权融合一定变差"):
+        assert stale not in text
+    assert any(isinstance(b, deck.Diagram) for b in module.LESSON.blocks)
+
+
+def test_chapter_three_source_excerpts_resolve_to_real_code(chapter_three):
+    module, _, text = chapter_three
+    for source in (b for b in module.LESSON.blocks if isinstance(b, deck.Source)):
+        path = ROOT / source.path
+        assert path.is_file(), source.path
+        assert source.path in text
+        if path.suffix == ".py" and source.symbol:
+            names = {n.name for n in ast.walk(ast.parse(path.read_text()))
+                     if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+            assert source.symbol.split(".")[-1] in names, source
+    for i, block in enumerate(module.LESSON.blocks[:-1]):
+        if isinstance(block, deck.Code) and block.caption.startswith("源码摘录"):
+            source = module.LESSON.blocks[i + 1]
+            assert isinstance(source, deck.Source)
+            expected = [line.strip() for line in block.text.strip().splitlines()]
+            actual = [line.strip() for line in (ROOT / source.path).read_text().splitlines()]
+            assert any(actual[j:j + len(expected)] == expected for j in range(len(actual))), block.caption
+
+
+@pytest.mark.parametrize("case_id", ["case-gpu-assert", "case-insufficient-evidence"])
+def test_chapter_three_replay_evidence_and_refusal_are_observed(chapter_three, case_id):
+    module, _, _ = chapter_three
+    assert hasattr(module, "REPLAY_OBSERVATIONS")
+    result = subprocess.run([sys.executable, "-m", "ailab_ops.cli", "investigate", "--case",
+                             case_id, "--mode", "replay"], cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    o = json.loads(result.stdout)
+    actual = {"mode": o["mode"], "phase": o["phase"], "steps_used": o["budget"]["steps_used"],
+              "tokens_used": o["budget"]["tokens_used"], "evidence_count": len(o["evidence"]),
+              "root_cause": o["report"]["root_cause"], "confidence": o["report"]["confidence"],
+              "material_claims": sum(c["material"] for c in o["report"]["claims"]),
+              "unknown_count": len(o["report"]["unknowns"]),
+              "evidence_tools": [e["source_tool"] for e in o["evidence"]]}
+    assert actual == module.REPLAY_OBSERVATIONS[case_id]
+
+
+def test_chapter_three_query_measurements_match_current_runbook_tool(chapter_three):
+    from ailab_ops.tools.runbooks import build_runbook_tool
+    module, _, _ = chapter_three
+    assert hasattr(module, "QUERY_OBSERVATIONS")
+    tool = build_runbook_tool()
+    for expected in module.QUERY_OBSERVATIONS:
+        result = tool.fn(query=expected["query"], top_k=3)
+        actual = {"query": expected["query"], "total_matches": result.data["total_matches"],
+                  "matches": [{"doc_id": m["doc_id"], "score": m["score"],
+                               "truncated": m["truncated"]} for m in result.data["matches"]]}
+        assert actual == expected
+
+
+def test_chapter_three_v1_baseline_sweep_is_reproducible_and_labelled(chapter_three):
+    module, _, text = chapter_three
+    assert hasattr(module, "V1_BASELINE")
+    # V1 equal-score candidates inherit set order. Fix hash seed in a fresh
+    # process; changing os.environ in this interpreter does not reset hashing.
+    script = textwrap.dedent('''
+        import json
+        from ailab_ops.datagen.taxonomy import load_playbook
+        from ailab_ops.legacy.runtime import build_legacy_runtime
+        from ailab_ops.rag import build_knowledge_base
+        from ailab_ops.signals import extract_log_evidence
+        world = build_legacy_runtime().world
+        pb = load_playbook()
+        queries = []
+        for job in world.jobs:
+            if job.status == "SUCCEEDED" or not job.root_cause or job.is_insufficient_evidence:
+                continue
+            q = (extract_log_evidence(world.logs_for(job.job_id), pb).first_error or "")[:200]
+            if q:
+                queries.append((q, job.root_cause))
+        kb = build_knowledge_base(pb)
+        results = []
+        for weight in [1.0, 0.0, 0.5, 0.7, 0.85, 0.9]:
+            kb.retriever.lexical_weight = weight
+            count = sum(kb.retriever.search(q, top_k=1).hits[0].doc.metadata.get("scenario") == truth
+                        for q, truth in queries)
+            results.append({"lexical_weight": weight, "correct_top1": count})
+        print(json.dumps({"n_queries": len(queries), "n_docs": len(kb.docs), "results": results}))
+    ''')
+    result = subprocess.run([sys.executable, "-c", script], cwd=ROOT, capture_output=True,
+                            text=True, env={**os.environ, "PYTHONHASHSEED": "0"})
+    assert result.returncode == 0, result.stderr
+    actual = json.loads(result.stdout)
+    assert actual == {k: module.V1_BASELINE[k] for k in ("n_queries", "n_docs", "results")}
+    assert "faults.yaml" in text and "seed=20260929" in text
+    assert "PYTHONHASHSEED=0" in text and "同分" in text
+    assert "不是 V2" in text and "共享" in text
