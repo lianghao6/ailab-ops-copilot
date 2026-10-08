@@ -370,3 +370,125 @@ def test_chapter_four_redaction_observation_is_real_presentation_boundary(chapte
         assert actual == module.REDACTION_OBSERVATION
     finally:
         rt.close()
+
+
+@pytest.fixture(scope="module")
+def chapter_five(tmp_path_factory):
+    module = importlib.import_module("lessons.l5")
+    path = deck.build(module.LESSON, tmp_path_factory.mktemp("chapter-five") / "lesson-5.pdf")
+    reader = PdfReader(path)
+    return module, reader, "\n".join(page.extract_text() for page in reader.pages)
+
+
+def test_chapter_five_publishes_layered_evaluation_with_explicit_boundaries(chapter_five):
+    module, reader, text = chapter_five
+    assert reader.metadata.title == "第 5 课 · 如何评测一个 Agent"
+    for concept in ("case-gpu-assert", "工具参数", "必需证据", "引用", "根因", "拒答",
+                    "策略", "延迟", "token", "labels.jsonl", "authored replay", "人工编写回放",
+                    "null", "stddev", "spread", "失败归因", "V1", "课后阅读"):
+        assert concept in text
+    for stale in ("口语化讲稿", "实操 1", "小面试", "MIN_MARGIN", "校准指标造不了假"):
+        assert stale not in text
+    assert any(isinstance(b, deck.Diagram) for b in module.LESSON.blocks)
+
+
+def test_chapter_five_sources_and_excerpts_resolve(chapter_five):
+    module, _, text = chapter_five
+    sources = [b for b in module.LESSON.blocks if isinstance(b, deck.Source)]
+    assert sources
+    for source in sources:
+        path = ROOT / source.path
+        assert path.is_file(), source.path
+        assert source.path in text
+        if path.suffix == ".py" and source.symbol:
+            names = {n.name for n in ast.walk(ast.parse(path.read_text()))
+                     if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+            assert source.symbol.split(".")[-1] in names, source
+    for i, block in enumerate(module.LESSON.blocks[:-1]):
+        if isinstance(block, deck.Code) and block.caption.startswith("源码摘录"):
+            source = module.LESSON.blocks[i + 1]
+            assert isinstance(source, deck.Source)
+            expected = [line.strip() for line in block.text.strip().splitlines()]
+            actual = [line.strip() for line in (ROOT / source.path).read_text().splitlines()]
+            assert any(actual[j:j + len(expected)] == expected for j in range(len(actual))), block.caption
+
+
+def test_chapter_five_replay_measurements_are_current_cli_observations(chapter_five):
+    import math
+    module, _, _ = chapter_five
+    assert hasattr(module, "REPLAY_OBSERVATION"), "published evaluation must be reproducible"
+    assert hasattr(module, "LOCAL_LATENCY_MS"), "volatile timing needs a retained observation vector"
+    from statistics import fmean, pstdev
+    assert len(module.LOCAL_LATENCY_MS) == 9
+    assert fmean(module.LOCAL_LATENCY_MS) == pytest.approx(55.482191344102226)
+    assert pstdev(module.LOCAL_LATENCY_MS) == pytest.approx(5.195309485232677)
+    result = subprocess.run([sys.executable, "-m", "ailab_ops.cli", "eval", "--mode", "replay",
+                             "--repeats", "3"], cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    actual = json.loads(result.stdout)
+    assert actual["mode"] == "replay"
+    assert actual["provenance"] == "authored replay simulation; not model capability"
+    stable = {"runs": len(actual["runs"]), "case_counts": {
+        cid: actual["by_case"][cid]["root_cause"]["count"] for cid in actual["by_case"]},
+        "summary": {k: v for k, v in actual["summary"].items() if k != "latency_ms"}}
+    assert stable == module.REPLAY_OBSERVATION
+    assert all(math.isfinite(r["latency_ms"]) and r["latency_ms"] >= 0 for r in actual["runs"])
+    assert all(r["issues"] == ["unconfigured_tool_choice", "unconfigured_required_evidence",
+                               "unconfigured_latency", "unconfigured_token_use"] for r in actual["runs"])
+
+
+def test_chapter_five_counterexamples_reproduce_scoring_limits(chapter_five):
+    import asyncio
+    from copy import deepcopy
+    from ailab_ops.config import Settings
+    from ailab_ops.evals.scoring import score_investigation
+    from ailab_ops.evals.runner import load_eval_labels
+    from ailab_ops.runtime import build_runtime
+    module, _, _ = chapter_five
+    assert hasattr(module, "COUNTEREXAMPLE_OBSERVATION")
+    rt = build_runtime(Settings(model_mode="replay", llm_api_key="", user_qps=0))
+    try:
+        view = asyncio.run(rt.investigate(case_id="case-gpu-assert"))
+        record = rt.record(view["session_id"])
+        state = record.orchestrator.states[view["session_id"]]
+        label = load_eval_labels(ROOT / "data/v2/evals/labels.jsonl")[state.case_id]
+        observed = []
+        for alteration in ("baseline", "wrong_root", "invented_citation", "false_claim"):
+            candidate = deepcopy(state)
+            if alteration == "wrong_root":
+                candidate.report.root_cause = "collective_transport_failure"
+            elif alteration == "invented_citation":
+                candidate.report.claims[0].evidence_ids = ["ev-missing"]
+            elif alteration == "false_claim":
+                candidate.report.claims[0].text = "The specific defective cable is conclusively identified."
+            score = score_investigation(candidate, label, evidence=view["evidence"], events=record.recorder.events)
+            observed.append({"alteration": alteration, "root_cause": score.root_cause,
+                             "citation_validity": score.citation_validity, "abstention": score.abstention})
+        assert observed == module.COUNTEREXAMPLE_OBSERVATION
+    finally:
+        rt.close()
+
+
+def test_chapter_five_example_configured_rules_use_actual_evidence(chapter_five):
+    import asyncio
+    from ailab_ops.config import Settings
+    from ailab_ops.evals.scoring import score_investigation
+    from ailab_ops.runtime import build_runtime
+    module, _, _ = chapter_five
+    assert hasattr(module, "EXAMPLE_RULES")
+    rt = build_runtime(Settings(model_mode="replay", llm_api_key="", user_qps=0))
+    try:
+        view = asyncio.run(rt.investigate(case_id="case-gpu-assert"))
+        record = rt.record(view["session_id"])
+        state = record.orchestrator.states[view["session_id"]]
+        score = score_investigation(state, module.EXAMPLE_RULES, evidence=view["evidence"],
+                                    events=record.recorder.events, latency_ms=50.0)
+        assert {k: score.scores[k] for k in ("tool_choice", "required_evidence", "latency", "token_use")} == {
+            "tool_choice": 1.0, "required_evidence": 1.0, "latency": 1.0, "token_use": 1.0}
+        # A schema-valid tool record is not evidence that every required fact was gathered.
+        reduced = [e for e in view["evidence"] if e["source_tool"] != "get_case_logs"]
+        partial = score_investigation(state, module.EXAMPLE_RULES, evidence=reduced,
+                                      events=record.recorder.events, latency_ms=50.0)
+        assert partial.tool_choice == 1.0 and partial.required_evidence == 0.5
+    finally:
+        rt.close()
