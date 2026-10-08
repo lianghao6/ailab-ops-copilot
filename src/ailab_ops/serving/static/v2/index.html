@@ -51,7 +51,7 @@
           <form id="restore-form">
             <label for="session-id">Session ID</label>
             <input id="session-id" maxlength="200" required autocomplete="off" placeholder="粘贴当前租户的 session ID">
-            <button type="submit">打开调查</button>
+            <button id="restore-button" type="submit">打开调查</button>
           </form>
           <p class="field-note">会话保存在服务进程中；服务重启后可能失效。</p>
         </details>
@@ -79,6 +79,11 @@
         <li data-phase="completed">完成</li><li data-phase="stopped">已停止</li>
       </ol>
       <div id="workspace-status" class="workspace-status" role="status" aria-live="polite" data-state="empty">选择一个案例，开始第一份调查。</div>
+      <div class="session-controls" aria-label="调查操作">
+        <button id="refresh-button" type="button" disabled>刷新服务端状态</button>
+        <button id="cancel-button" type="button" hidden>取消本次等待</button>
+        <span class="field-note">取消仅中止浏览器等待；服务端停止须通过刷新核验。</span>
+      </div>
       <section class="chapter" aria-labelledby="plan-title">
         <div class="chapter-heading"><p class="eyebrow">THE APPROACH</p><h3 id="plan-title">调查计划</h3></div>
         <ol id="plan-list" class="plan-list"><li class="empty">暂无调查计划。</li></ol>
@@ -102,7 +107,31 @@
       <section id="action-panel" class="chapter" aria-labelledby="action-title">
         <div class="chapter-heading"><p class="eyebrow">06 / HUMAN REVIEW</p><h3 id="action-title">行动与审批 <span class="badge">模拟</span></h3><p>审批状态与行动依据随会话保留。</p></div>
         <div id="approval-list"><p class="empty">暂无行动提案。</p></div>
-        <div id="action-controls"></div>
+        <div id="action-controls" hidden>
+          <label for="action-actor">审阅 / 执行人</label>
+          <input id="action-actor" maxlength="100" autocomplete="off" placeholder="明确填写操作者标识">
+          <p class="field-note">先审阅并批准，再单独确认模拟执行。拒绝必须说明原因。</p>
+          <form id="proposal-form" hidden>
+            <fieldset id="proposal-fields">
+              <legend>提出模拟行动</legend>
+              <p class="field-note">仅在已完成且有引用的报告上提出行动。可用工具与参数由服务端策略校验。</p>
+              <label for="proposal-tool">工具名称</label>
+              <input id="proposal-tool" maxlength="200" required placeholder="例如 annotate_incident">
+              <label for="proposal-arguments">参数（JSON 对象）</label>
+              <textarea id="proposal-arguments" required placeholder='{"case_id":"case-gpu-assert","note":"审阅结论"}'></textarea>
+              <label for="proposal-evidence">引用证据 ID（逗号分隔）</label>
+              <input id="proposal-evidence" required placeholder="从上方证据记录复制 ID">
+              <label for="proposal-reason">行动理由</label>
+              <textarea id="proposal-reason" required></textarea>
+              <label for="proposal-risk">风险</label>
+              <textarea id="proposal-risk" required></textarea>
+              <label for="proposal-rollback">回滚方案</label>
+              <textarea id="proposal-rollback" required></textarea>
+              <button id="proposal-button" type="submit">提交审批提案</button>
+            </fieldset>
+          </form>
+        </div>
+        <div class="approval-audit"><h4>审批审计序列</h4><ol id="approval-audit" class="timeline-list"></ol><p id="audit-note" class="field-note">暂无审批审计。</p></div>
       </section>
       <footer class="casebook-footer">AILab Ops Copilot <span>证据先行 · 保留未知 · 人工审阅</span></footer>
     </article>

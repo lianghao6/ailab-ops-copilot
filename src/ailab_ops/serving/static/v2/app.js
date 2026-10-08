@@ -3,9 +3,11 @@
 (() => {
   const byId = (id) => document.getElementById(id);
   const storageKey = "ailab-ops-v2-context";
-  const state = { tenantId: "tenant-01", sessionId: "", detail: null, modelMode: "unknown", kind: "empty" };
+  const state = { tenantId: "tenant-01", sessionId: "", detail: null, modelMode: "unknown", kind: "empty", busy: false, writing: false, syncRequired: false };
   let activeController = null;
   let generation = 0;
+  let pollTimer = null;
+  let pollPaused = false;
 
   class ApiError extends Error {
     constructor(kind, status, payload) {
@@ -39,10 +41,16 @@
     if (tenantId) input.value = tenantId;
     if (tenantId && tenantId === state.tenantId) return tenantId;
     if (activeController) activeController.abort();
+    stopPolling();
     generation += 1;
+    state.busy = false;
+    state.writing = false;
+    state.syncRequired = false;
+    pollPaused = false;
     state.tenantId = tenantId;
     state.sessionId = "";
     byId("session-id").value = "";
+    for (const id of ["action-actor", "proposal-tool", "proposal-arguments", "proposal-evidence", "proposal-reason", "proposal-risk", "proposal-rollback"]) byId(id).value = "";
     persistContext();
     render(null);
     banner(state.modelMode);
@@ -94,7 +102,23 @@
     byId("workspace-status").dataset.state = kind;
     byId("workspace-status").textContent = message;
     byId("investigation").setAttribute("aria-busy", String(kind === "loading"));
-    byId("start-button").disabled = kind === "loading" || !["replay", "online"].includes(state.modelMode);
+    updateControls();
+  }
+
+  function updateControls() {
+    byId("start-button").disabled = state.busy || !["replay", "online"].includes(state.modelMode);
+    byId("restore-button").disabled = state.writing;
+    byId("refresh-button").disabled = state.busy || !state.sessionId;
+    byId("cancel-button").hidden = !state.busy;
+    byId("action-controls").hidden = !state.detail;
+    byId("proposal-form").hidden = state.detail?.phase !== "completed" || !state.detail?.report;
+    byId("proposal-fields").disabled = state.busy || state.syncRequired;
+    byId("proposal-button").disabled = state.busy || state.syncRequired;
+    function walk(element) {
+      if (element.dataset.action) element.disabled = state.busy || state.syncRequired || element.dataset.unavailable === "true";
+      for (const child of element.children) walk(child);
+    }
+    walk(byId("approval-list"));
   }
 
   function banner(mode) {
@@ -223,17 +247,104 @@
 
   function renderApprovals(approvals, ids) {
     const board = byId("approval-list");
+    const snapshots = approvals.map((approval) => json(approval));
+    if (approvals.length && board.children.length === approvals.length
+        && snapshots.every((snapshot, index) => board.children[index].dataset.snapshot === snapshot)) {
+      // Keep the actual input nodes during polling so keyboard focus and draft
+      // rejection reasons survive. Only the server may change request status.
+      function expiryControls(element, unavailable) {
+        if (element.dataset.action) element.dataset.unavailable = String(unavailable);
+        for (const child of element.children) expiryControls(child, unavailable);
+      }
+      approvals.forEach((approval, index) => {
+        const deadline = Date.parse(approval.expires_at);
+        expiryControls(board.children[index], !Number.isFinite(deadline) || Date.now() >= deadline);
+      });
+      return;
+    }
+    const previous = new Map();
+    for (const article of board.children) {
+      if (!article.dataset.snapshot) continue;
+      const values = {};
+      function remember(element) {
+        if (element.dataset.confirm) values[element.dataset.confirm] = element.checked;
+        if (element.dataset.reason) values.reason = element.value;
+        for (const child of element.children) remember(child);
+      }
+      remember(article);
+      previous.set(article.dataset.snapshot, values);
+    }
     board.replaceChildren();
     if (!approvals.length) return empty(board, "暂无行动提案。所有行动均为模拟。");
     for (const approval of approvals) {
       const article = node("article", null, "approval");
+      article.dataset.snapshot = json(approval);
+      const review = previous.get(article.dataset.snapshot) || {};
       article.append(node("h4", approval.tool || "行动提案"), node("p", `${approval.request_id} · ${approval.status}`, "source-line"));
       for (const [label, field] of [["理由", "reason"], ["风险", "risk"], ["回滚", "rollback"], ["到期", "expires_at"]]) {
         article.append(node("p", `${label} / ${approval[field] || "未给出"}`));
       }
-      article.append(citations(approval.evidence_ids, ids), details("行动参数", approval.arguments));
+      const parameters = details("行动参数", approval.arguments);
+      parameters.open = true;
+      article.append(citations(approval.evidence_ids, ids), parameters);
+      if (approval.approved_by) article.append(node("p", `批准人 / ${approval.approved_by}`));
+      if (approval.rejection_reason) article.append(node("p", `拒绝原因 / ${approval.rejection_reason}`));
+      if (approval.result) article.append(details("模拟执行结果 / SIMULATION", approval.result));
+      const deadline = Date.parse(approval.expires_at);
+      const unavailable = !Number.isFinite(deadline) || Date.now() >= deadline;
+      if (unavailable && ["pending", "approved"].includes(approval.status)) {
+        article.append(node("p", "到期时间已过或无法核验。请刷新服务端状态；当前显示保留服务端最后确认的状态。", "field-note"));
+      }
+      if (["pending", "approved"].includes(approval.status)) {
+        const controls = node("div", null, "decision-controls");
+        const decision = approval.status === "pending" ? "approve" : "execute";
+        const checkbox = node("input");
+        checkbox.type = "checkbox";
+        checkbox.dataset.confirm = decision;
+        checkbox.checked = Boolean(review[decision]);
+        const label = node("label");
+        label.append(checkbox, node("span", decision === "approve"
+          ? "我已核查工具、参数、证据、理由、风险、回滚及有效期，确认批准此提案。"
+          : "我确认单独执行已批准的行动（仅模拟）。"));
+        const button = node("button", decision === "approve" ? "批准提案" : "执行模拟");
+        button.type = "button";
+        button.dataset.action = decision;
+        button.dataset.unavailable = String(unavailable);
+        button.addEventListener("click", () => decideApproval(approval.request_id, decision, { confirmed: checkbox.checked }));
+        controls.append(label, button);
+        if (approval.status === "pending") {
+          const reason = node("textarea");
+          reason.dataset.reason = "reject";
+          reason.value = review.reason || "";
+          reason.id = `reject-${approval.request_id}`;
+          const reasonLabel = node("label", "拒绝原因（必填）");
+          reasonLabel.setAttribute("for", reason.id);
+          const reject = node("button", "拒绝提案");
+          reject.type = "button";
+          reject.dataset.action = "reject";
+          reject.dataset.unavailable = String(unavailable);
+          reject.addEventListener("click", () => decideApproval(approval.request_id, "reject", { reason: reason.value }));
+          controls.append(reasonLabel, reason, reject);
+        }
+        article.append(controls);
+      }
       board.append(article);
     }
+  }
+
+  function renderAudit(timeline) {
+    const board = byId("approval-audit");
+    board.replaceChildren();
+    const events = list(timeline?.events).filter((event) => event.kind === "approval");
+    for (const event of events) {
+      const item = node("li");
+      item.append(node("time", event.timestamp || "时间未提供"), node("p", `${event.event} / ${event.payload?.actor || "未给出"} / ${event.approval_id || ""}`));
+      item.append(details("审计数据", event.payload));
+      board.append(item);
+    }
+    byId("audit-note").textContent = timeline?.truncated
+      ? "服务端审计窗口已截断，当前显示最近事件；更早事件未包含在响应中。"
+      : events.length ? `已展示服务端返回的 ${events.length} 条审批审计，按发生顺序排列。` : "暂无审批审计。";
   }
 
   function render(detail) {
@@ -265,15 +376,56 @@
     renderReport(detail?.report, ids);
     renderTimeline(detail?.timeline);
     renderApprovals(list(detail?.approvals), ids);
+    renderAudit(detail?.timeline);
+    updateControls();
     document.dispatchEvent(new CustomEvent("ailab:investigation", { detail }));
   }
 
-  function begin(message) {
+  function begin(message, writing = false) {
     if (activeController) activeController.abort();
+    stopPolling();
     activeController = new AbortController();
     generation += 1;
+    state.busy = true;
+    state.writing = writing;
     status("loading", message);
     return { signal: activeController.signal, generation };
+  }
+
+  function stopPolling() {
+    if (pollTimer !== null) clearTimeout(pollTimer);
+    pollTimer = null;
+  }
+
+  function schedulePoll() {
+    stopPolling();
+    if (pollPaused || state.busy || !state.sessionId || !state.detail || ["completed", "stopped"].includes(state.detail.phase)) return;
+    const owner = generation;
+    pollTimer = setTimeout(async () => {
+      pollTimer = null;
+      if (owner === generation && !state.busy) await refreshSession();
+    }, 2500);
+  }
+
+  function finish(operation) {
+    if (operation.generation !== generation) return;
+    activeController = null;
+    state.busy = false;
+    state.writing = false;
+    updateControls();
+    schedulePoll();
+  }
+
+  function cancelRequest() {
+    if (!state.busy) return;
+    if (activeController) activeController.abort();
+    stopPolling();
+    generation += 1;
+    if (state.writing && state.detail) state.syncRequired = true;
+    activeController = null;
+    state.busy = false;
+    state.writing = false;
+    status("cancelled", "已取消本次浏览器等待；服务端是否停止或完成操作尚未确认。已有会话请刷新核验。");
   }
 
   function showError(error) {
@@ -282,49 +434,136 @@
       not_found: "找不到案例或会话：请确认标识、租户与服务进程。",
       validation_error: "请求格式未通过校验。请检查案例标识与输入长度。",
       invalid_response: "服务响应不是有效 JSON。请检查服务连接后重试。",
-      network_error: "无法连接服务。请检查连接后重试。"
+      network_error: "无法连接服务。请检查连接后重试。",
+      approval_conflict: "审批操作与当前策略或状态冲突。请刷新并核查提案。",
+      queue_full: "服务队列已满。",
+      queue_timeout: "等待服务队列超时。",
+      circuit_open: "模型服务暂时不可用。",
+      upstream: "上游服务暂时不可用。"
     };
     const kind = error.kind || "network_error";
-    const retry = error.payload?.error?.retryable ? " 服务允许稍后重试。" : "";
-    status(kind === "replay_miss" ? "replay_miss" : "error", (messages[kind] || `调查失败 / ${kind}。`) + retry);
+    pollPaused = !error.payload?.error?.retryable && !["network_error", "invalid_response"].includes(kind);
+    const seconds = error.payload?.error?.retry_after_s;
+    const retry = error.payload?.error?.retryable ? ` 服务允许${Number.isFinite(seconds) ? ` ${seconds} 秒后` : "稍后"}重试。` : "";
+    const sync = state.syncRequired ? " 操作结果尚未核验，请刷新服务端状态后继续。" : "";
+    status(kind === "replay_miss" ? "replay_miss" : "error", (messages[kind] || `调查失败 / ${kind}。`) + retry + sync);
+  }
+
+  async function readSession(sessionId, operation) {
+    const detail = await request(sessionPath(sessionId), { signal: operation.signal });
+    if (operation.generation !== generation) return detail;
+    // Presentation resources cap timeline windows at 500. Ask for the largest
+    // window for audit history and report truncation rather than inventing it.
+    if (list(detail.approvals).length) {
+      const timeline = await request(`${sessionPath(sessionId, "/timeline")}&limit=500`, { signal: operation.signal });
+      detail.timeline = timeline;
+    }
+    return detail;
+  }
+
+  function acceptSession(detail) {
+    state.syncRequired = false;
+    pollPaused = false;
+    render(detail);
+    if (detail.error) showError(new ApiError(detail.error.kind, 200, detail));
+    else status("ready", detail.stop_reason ? `调查已停止 / ${detail.stop_reason}`
+      : ["completed", "stopped"].includes(detail.phase) ? "调查已返回。请核查证据、未知项与建议。"
+        : `当前阶段 / ${detail.phase}。服务端状态将自动刷新。`);
   }
 
   async function loadSession(sessionId) {
-    if (!confirmTenant() || !sessionId) return;
+    if (!confirmTenant() || !sessionId || state.writing) return;
     const operation = begin("正在恢复调查与引用证据…");
-    render(null);
     try {
-      const detail = await request(sessionPath(sessionId), { signal: operation.signal });
+      const detail = await readSession(sessionId, operation);
       if (operation.generation !== generation) return;
-      render(detail);
-      if (detail.error) showError(new ApiError(detail.error.kind, 200, detail));
-      else status("ready", detail.stop_reason ? `调查已停止 / ${detail.stop_reason}` : "调查已恢复。可核查下方证据与引用。");
+      acceptSession(detail);
     } catch (error) {
       if (error.name === "AbortError" || operation.generation !== generation) return;
       showError(error);
-    }
+    } finally { finish(operation); }
+  }
+
+  async function refreshSession() {
+    if (!confirmTenant() || state.busy || !state.sessionId) return;
+    return loadSession(state.sessionId);
   }
 
   byId("intake-form").addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (!confirmTenant() || !["replay", "online"].includes(state.modelMode)) return;
+    if (!confirmTenant() || state.busy || !["replay", "online"].includes(state.modelMode)) return;
     const body = { tenant_id: state.tenantId, case_id: state.modelMode === "online" ? byId("case-input").value.trim() : byId("case-select").value };
     if (byId("question").value.trim()) body.question = byId("question").value.trim();
-    const operation = begin("正在调查：收集证据、验证假设与整理报告…");
-    state.sessionId = "";
-    persistContext();
-    render(null);
+    const operation = begin("正在调查：收集证据、验证假设与整理报告…", true);
     try {
-      const detail = await request("/v2/investigations", { method: "POST", body: JSON.stringify(body), signal: operation.signal });
+      let detail = await request("/v2/investigations", { method: "POST", body: JSON.stringify(body), signal: operation.signal });
       if (operation.generation !== generation) return;
-      render(detail);
-      status("ready", detail.stop_reason ? `调查已停止 / ${detail.stop_reason}` : "调查已返回。请核查证据、未知项与建议。");
+      if (list(detail.approvals).length) {
+        // Retain the confirmed create response even if the expanded audit read
+        // fails; it includes the session ID needed for a manual retry.
+        render(detail);
+        detail = await readSession(detail.session_id, operation);
+        if (operation.generation !== generation) return;
+      }
+      acceptSession(detail);
     } catch (error) {
       if (error.name === "AbortError" || operation.generation !== generation) return;
       if (error.payload?.session_id) render(error.payload);
       showError(error);
-    }
+    } finally { finish(operation); }
   });
+
+  async function mutate(path, body) {
+    const sessionId = state.sessionId;
+    const operation = begin("正在提交操作并刷新服务端审批与审计…", true);
+    // A network failure may arrive after a committed write. Until a complete
+    // reread, keep the old snapshot and prevent decisions based on it.
+    state.syncRequired = true;
+    try {
+      await request(path, { method: "POST", body: JSON.stringify(body), signal: operation.signal });
+      if (operation.generation !== generation) return;
+      const detail = await readSession(sessionId, operation);
+      if (operation.generation !== generation) return;
+      acceptSession(detail);
+    } catch (error) {
+      if (error.name === "AbortError" || operation.generation !== generation) return;
+      showError(error);
+    } finally { finish(operation); }
+  }
+
+  async function proposeAction() {
+    if (!confirmTenant() || state.busy || state.syncRequired || !state.detail) return;
+    if (state.detail.phase !== "completed" || !state.detail.report) return status("error", "需要已完成且有引用的调查报告才能提出行动。");
+    const proposal = {};
+    for (const field of ["tool", "reason", "risk", "rollback"]) proposal[field] = byId(`proposal-${field}`).value.trim();
+    try { proposal.arguments = JSON.parse(byId("proposal-arguments").value); }
+    catch (_) { return status("error", "行动参数必须是有效 JSON 对象。"); }
+    if (!proposal.arguments || Array.isArray(proposal.arguments) || typeof proposal.arguments !== "object") return status("error", "行动参数必须是 JSON 对象。");
+    proposal.evidence_ids = [...new Set(byId("proposal-evidence").value.split(",").map((id) => id.trim()).filter(Boolean))];
+    const knownIds = list(state.detail.evidence).map((item) => item.evidence_id);
+    if (["tool", "reason", "risk", "rollback"].some((field) => !proposal[field]) || !proposal.evidence_ids.length || proposal.evidence_ids.some((id) => !knownIds.includes(id))) {
+      return status("error", "请完整填写工具、理由、风险、回滚，以及当前会话中可核查的引用证据。");
+    }
+    return mutate(sessionPath(state.sessionId, "/approvals"), { tenant_id: state.tenantId, proposal });
+  }
+
+  async function decideApproval(approvalId, decision, { confirmed = false, reason = "" } = {}) {
+    if (!confirmTenant() || state.busy || state.syncRequired || !state.detail) return;
+    const approval = list(state.detail.approvals).find((item) => item.request_id === approvalId);
+    if (!["approve", "reject", "execute"].includes(decision) || !approval) return;
+    const expected = decision === "execute" ? "approved" : "pending";
+    const expiry = Date.parse(approval.expires_at);
+    if (approval.status !== expected || !Number.isFinite(expiry) || Date.now() >= expiry) return status("error", "当前审批状态或有效期不允许该操作。请刷新核验。");
+    const actor = byId("action-actor").value.trim();
+    if (!actor || actor.length > 100) return status("error", "请填写明确的审阅 / 执行人（1–100 个字符）。");
+    reason = reason.trim();
+    if (decision === "reject" ? !reason : !confirmed) return status("error", decision === "reject" ? "拒绝提案必须填写原因。" : "请先勾选明确确认，再进行批准或模拟执行。");
+    return mutate(`/v2/approvals/${encodeURIComponent(approvalId)}/${decision}`, { tenant_id: state.tenantId, actor, reason });
+  }
+
+  byId("proposal-form").addEventListener("submit", (event) => { event.preventDefault(); return proposeAction(); });
+  byId("refresh-button").addEventListener("click", refreshSession);
+  byId("cancel-button").addEventListener("click", cancelRequest);
 
   byId("restore-form").addEventListener("submit", (event) => {
     event.preventDefault();
@@ -335,7 +574,7 @@
 
   // The action workflow can subscribe to ailab:investigation and use this
   // presentation boundary without duplicating session ownership or DOM sinks.
-  window.AILabWorkspace = { state, request, sessionPath, loadSession, render, status, node, citations, ApiError, confirmTenant };
+  window.AILabWorkspace = { state, request, sessionPath, loadSession, refreshSession, proposeAction, decideApproval, cancelRequest, render, status, node, citations, ApiError, confirmTenant };
 
   async function boot() {
     readContext();

@@ -81,6 +81,19 @@ pre { font: 11px/1.75 var(--mono); background: var(--paper); border-left: 2px so
 .evidence-card details, .timeline-list details { font-size: 11px; margin-top: .6rem; }
 .hypothesis, .approval { padding: 1rem 0; border-top: 1px solid var(--rule); }
 .hypothesis p, .approval p { margin: .4rem 0; font-size: 12px; }
+.session-controls, .decision-controls { display: flex; align-items: center; flex-wrap: wrap; gap: .7rem; }
+.session-controls .field-note { flex-basis: 100%; margin-top: 0; }
+.decision-controls { margin: 1rem 0; }
+.decision-controls label { margin: 0; width: 100%; font-weight: normal; }
+.decision-controls input[type="checkbox"] { width: auto; margin-right: .6rem; }
+.decision-controls textarea { flex-basis: 100%; min-height: 65px; }
+.approval-audit { margin-top: 1.5rem; }
+.approval-audit h4 { font-size: 17px; }
+#action-controls { padding-top: 1rem; }
+#action-actor { max-width: 24rem; }
+#proposal-form fieldset { margin: 0; padding: 1rem; border: 1px solid var(--rule); min-width: 0; }
+#proposal-form legend { color: var(--accent); font: 16px var(--serif); padding: 0 .5rem; }
+#proposal-form textarea { min-height: 65px; }
 .citation-list { display: inline-flex; gap: .4rem; flex-wrap: wrap; margin-left: .45rem; }
 .citation { font: 10px/1.8 var(--mono); border-bottom: 1px solid var(--accent); text-decoration: none; overflow-wrap: anywhere; }
 .citation-unavailable { font: 10px var(--mono); color: var(--error); }
