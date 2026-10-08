@@ -17,7 +17,9 @@ from uuid import uuid4
 from ailab_ops.approvals import ApprovalError, ApprovalRequest, ApprovalService, ApprovalStore
 from ailab_ops.evidence import Evidence, EvidenceStore, ValidationIssue, validate_report
 from ailab_ops.llm.base import ChatMessage, FinishReason, ToolCall
-from ailab_ops.models.protocol import ModelBackendError, ModelGateway
+from ailab_ops.models.protocol import (
+    ModelBackendError, ModelGateway, ModelRequestInterrupted as InvestigationInterrupted,
+)
 from ailab_ops.observability.events import TraceEvent
 from ailab_ops.policy import PolicyContext, PolicyEngine
 from ailab_ops.tools.registry import ToolRegistry, ToolResult
@@ -30,14 +32,6 @@ from .prompts import SYSTEM_PROMPT
 
 class InvestigationSessionError(ValueError):
     """State does not belong to a live session of this orchestrator."""
-
-
-class InvestigationInterrupted(RuntimeError):
-    """Control-plane stop before model execution, not an upstream failure."""
-
-    def __init__(self, reason: str):
-        super().__init__(reason)
-        self.reason = reason
 
 
 @dataclass
@@ -364,7 +358,7 @@ class InvestigationOrchestrator:
 
     @staticmethod
     def _normalize(name: str, arguments: dict, result: ToolResult) -> list[Evidence]:
-        if result.evidence_items:
+        if result.evidence_items is not None:
             return [replace(deepcopy(item), source_tool=name, arguments=deepcopy(arguments), evidence_id="",
                             truncated=item.truncated or result.truncated) for item in result.evidence_items]
         return [Evidence(name, deepcopy(arguments), f"Observation from {name}",

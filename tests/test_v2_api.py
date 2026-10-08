@@ -116,7 +116,7 @@ def test_online_adapter_executes_full_investigation_over_mock_transport():
         result = create(client)
         assert result["mode"] == "online" and result["phase"] == "completed"
         assert result["report"]["root_cause"] == "gpu_device_assert"
-        assert result["budget"]["tokens_used"] == 800
+        assert result["budget"]["tokens_used"] == 1000
         assert rt.limiter.snapshot()["tenants"]["tenant-01"]["usd_today"] > 0
 
 
@@ -124,3 +124,42 @@ def test_api_rejects_missing_case_and_invalid_budgets(client):
     assert client.post("/v2/investigations", json={"case_id": "case-missing"}).status_code == 404
     assert client.post("/v2/investigations", json={"case_id": "../secret"}).status_code == 422
     assert client.post("/v2/investigations", json={"case_id": "case-gpu-assert", "max_steps": -1}).status_code == 422
+
+
+@pytest.mark.parametrize("length,allowed", [(0, False), (1, True), (4000, True), (4001, False)])
+def test_annotation_note_length_contract_at_api_boundary(client, length, allowed):
+    result = create(client)
+    action = proposal(result)
+    action["arguments"]["note"] = "字" * length
+    requested = client.post("/v2/investigations/" + result["session_id"] + "/approvals", json={"proposal": action})
+    if not allowed:
+        assert requested.status_code == 409
+        assert "arguments.note" in requested.json()["error"]["message"]
+        return
+    assert requested.status_code == 200
+    path = "/v2/approvals/" + requested.json()["request_id"]
+    assert client.post(path + "/approve", json={"actor": "reviewer"}).status_code == 200
+    executed = client.post(path + "/execute", json={"actor": "operator"})
+    assert executed.status_code == 200
+    assert executed.json()["simulated"] is True
+
+
+@pytest.mark.parametrize("length", [0, 4001])
+def test_approved_annotation_rechecks_current_string_limits_before_execution(client, length):
+    result = create(client)
+    orchestrator = client.app.state.rt.record(result["session_id"]).orchestrator
+    note_schema = orchestrator.registry.get("annotate_incident").parameters["properties"]["note"]
+    # A request approved under an older permissive policy must obey the new
+    # published constraints when simulation execution is authorized again.
+    note_schema.pop("minLength")
+    note_schema.pop("maxLength")
+    action = proposal(result)
+    action["arguments"]["note"] = "x" * length
+    requested = client.post("/v2/investigations/" + result["session_id"] + "/approvals", json={"proposal": action})
+    assert requested.status_code == 200
+    path = "/v2/approvals/" + requested.json()["request_id"]
+    assert client.post(path + "/approve", json={"actor": "reviewer"}).status_code == 200
+    note_schema.update(minLength=1, maxLength=4000)
+    assert client.post(path + "/execute", json={"actor": "operator"}).status_code == 409
+    assert client.get(path).json()["status"] == "approved"
+    assert "execution_started" not in [event.event for event in orchestrator.approval_service.store.audit_events]

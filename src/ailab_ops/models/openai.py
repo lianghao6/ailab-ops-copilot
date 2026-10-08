@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from typing import Sequence
 
@@ -13,7 +14,7 @@ from ailab_ops.llm.openai_compat import (
     OpenAICompatClient, OpenAICompatError, _finish_from, _is_loopback,
     _parse_args, _retry_after_header, _usage_from, classify_status,
 )
-from .protocol import ModelBackendError
+from .protocol import ModelBackendError, ModelConfigurationError, ModelRequestControl
 
 
 class OpenAIModelGateway(OpenAICompatClient):
@@ -28,15 +29,19 @@ class OpenAIModelGateway(OpenAICompatClient):
     def __init__(self, base_url: str, model: str, api_key: str = "EMPTY", *,
                  client: httpx.Client | None = None, transport: httpx.BaseTransport | None = None,
                  timeout_s: float = 60.0, connect_timeout_s: float = 5.0,
-                 max_retries: int = 2, backoff_base_s: float = 0.4):
+                 max_retries: int = 2, backoff_base_s: float = 0.4,
+                 retry_max_delay_s: float = 30.0):
         if client is not None and transport is not None:
             raise ValueError("Provide either client or transport")
+        if not math.isfinite(retry_max_delay_s) or retry_max_delay_s < 0:
+            raise ModelConfigurationError("retry_max_delay_s must be finite and non-negative")
         super().__init__(base_url=base_url, model=model, api_key=api_key, timeout_s=timeout_s,
                          connect_timeout_s=connect_timeout_s, max_retries=max_retries,
                          backoff_base_s=backoff_base_s)
         self._client = client
         self._owns_client = client is None
         self._transport = transport
+        self.retry_max_delay_s = retry_max_delay_s
 
     @property
     def client(self) -> httpx.Client:
@@ -53,13 +58,21 @@ class OpenAIModelGateway(OpenAICompatClient):
 
     def complete(self, messages: Sequence[ChatMessage], tools: Sequence[ToolSpec] | None = None,
                  *, max_tokens: int = 1024) -> LLMResponse:
+        return self.complete_with_control(messages, tools, max_tokens=max_tokens)
+
+    def complete_with_control(self, messages: Sequence[ChatMessage], tools: Sequence[ToolSpec] | None = None,
+                              *, max_tokens: int = 1024,
+                              control: ModelRequestControl | None = None) -> LLMResponse:
         payload = self._payload(messages, tools, 0.0, max_tokens, stream=True)
         payload["stream_options"] = {"include_usage": True}
         started = time.perf_counter()
         for attempt in range(self.max_retries + 1):
+            remaining = control.remaining() if control else self.timeout_s
+            timeout = httpx.Timeout(min(self.timeout_s, remaining),
+                                    connect=min(self.connect_timeout_s, remaining))
             try:
                 # Full URL also makes injected clients independent of base_url.
-                with self.client.stream("POST", self.base_url + "/chat/completions", json=payload,
+                with self.client.stream("POST", self.base_url + "/chat/completions", json=payload, timeout=timeout,
                         headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}) as response:
                     if response.status_code != 200:
                         body = response.read().decode("utf-8", "replace")
@@ -87,10 +100,23 @@ class OpenAIModelGateway(OpenAICompatClient):
                 # Never echo provider data or httpx exception text: either can
                 # contain an authorization header or other request credentials.
                 raise ModelBackendError("Invalid model backend response", kind="protocol") from None
+            if control:
+                # The in-flight operation may finish, but a cancelled/expired
+                # investigation must not back off or create another request.
+                control.remaining()
+            hint = error.retry_after_s
+            if hint is None or not math.isfinite(hint) or hint < 0:
+                hint = self._backoff(attempt + 1) if error.retryable else None
+            if hint is not None:
+                hint = min(hint, self.retry_max_delay_s) if math.isfinite(hint) and hint >= 0 else 0.0
+            # One normalized value governs both backoff and the public error.
+            error.retry_after_s = hint
             if not error.retryable or attempt == self.max_retries:
                 raise error from None
-            delay = error.retry_after_s if error.retry_after_s is not None else self._backoff(attempt + 1)
-            time.sleep(max(0.0, delay))
+            if control:
+                control.wait(error.retry_after_s)
+            else:
+                time.sleep(error.retry_after_s)
         raise ModelBackendError("Model request failed")
 
     def _collect_stream(self, response: httpx.Response, messages: Sequence[ChatMessage]) -> LLMResponse:
@@ -136,9 +162,11 @@ class OpenAIModelGateway(OpenAICompatClient):
                     slot["args"] += function.get("arguments") or ""
                 if choice.get("finish_reason"):
                     reason = choice["finish_reason"]
-                    if reason not in {"stop", "length", "tool_calls", "function_call"}:
+                    if reason not in {"stop", "length", "error", "tool_calls", "function_call"}:
                         raise ModelBackendError("Invalid model backend stream finish reason", kind="protocol", phase="stream")
-                    finish = _finish_from(reason)
+                    parsed = FinishReason.ERROR if reason == "error" else _finish_from(reason)
+                    if finish not in {FinishReason.LENGTH, FinishReason.ERROR} or parsed == FinishReason.ERROR:
+                        finish = parsed
                     saw_terminal = True
         if not saw_choice:
             raise ModelBackendError("Model backend stream contained no choices", kind="protocol", phase="stream")
@@ -150,6 +178,8 @@ class OpenAIModelGateway(OpenAICompatClient):
         if usage is None:
             usage = Usage(sum(approx_tokens(message.text_for_prompt()) for message in messages),
                           approx_tokens(content) + sum(approx_tokens(tool.raw_arguments) for tool in tool_calls))
+        if tool_calls and finish not in {FinishReason.LENGTH, FinishReason.ERROR}:
+            finish = FinishReason.TOOL_CALLS
         return LLMResponse(content=content, tool_calls=tool_calls,
-                           finish_reason=FinishReason.TOOL_CALLS if tool_calls else finish,
+                           finish_reason=finish,
                            usage=usage, model=model)

@@ -280,6 +280,12 @@ class CircuitBreaker:
                 self.state = BreakerState.CLOSED
                 self._half_open_in_flight = 0
 
+    def release_probe(self) -> None:
+        """Release a cooperatively interrupted probe without judging the backend."""
+        with self._lock:
+            if self.state == BreakerState.HALF_OPEN:
+                self._half_open_in_flight = max(0, self._half_open_in_flight - 1)
+
     def record_failure(self) -> None:
         with self._lock:
             self.failures += 1

@@ -19,6 +19,7 @@ from .investigation import Budget, InvestigationOrchestrator, InvestigationPhase
 from .investigation.orchestrator import InvestigationInterrupted
 from .llm.base import approx_tokens
 from .models import ModelBackendError, build_model_gateway
+from .models.protocol import ModelRequestControl
 from .observability import TraceRecorder
 from .serving.cache import BreakerRegistry
 from .serving.gate import GateRejected, UpstreamGate
@@ -31,23 +32,28 @@ class GuardedGateway:
 
     def __init__(self, runtime, cancelled, deadline_at):
         self.runtime, self.cancelled, self.deadline_at = runtime, cancelled, deadline_at
+        self.control = ModelRequestControl(cancelled, deadline_at)
         self.mode, self.model = runtime.gateway.mode, runtime.gateway.model
         self.error = None
         self.response = None
 
     def complete(self, messages, tools=None, *, max_tokens=1024):
-        if self.cancelled.is_set():
-            raise InvestigationInterrupted("cancelled")
-        if datetime.now(timezone.utc) >= self.deadline_at:
-            raise InvestigationInterrupted("budget_exhausted:deadline")
+        self.control.remaining()
         breaker = self.runtime.breakers.get("model")
         try:
             if not breaker.allow():
                 raise ModelBackendError("Model circuit is open", kind="circuit_open", retryable=True,
                                         retry_after_s=breaker.cooldown_s)
             try:
-                self.response = self.runtime.gateway.complete(messages, tools, max_tokens=max_tokens)
+                controlled = getattr(self.runtime.gateway, "complete_with_control", None)
+                if controlled:
+                    self.response = controlled(messages, tools, max_tokens=max_tokens, control=self.control)
+                else:
+                    self.response = self.runtime.gateway.complete(messages, tools, max_tokens=max_tokens)
+            except InvestigationInterrupted:
+                raise
             except ModelBackendError as exc:
+                self.control.remaining()
                 if exc.retryable:
                     breaker.record_failure()
                 else:
@@ -58,6 +64,9 @@ class GuardedGateway:
                 raise ModelBackendError("Unexpected model backend failure", kind="upstream", retryable=True) from None
             breaker.record_success()
             return self.response
+        except InvestigationInterrupted:
+            breaker.release_probe()
+            raise
         except ModelBackendError as exc:
             self.error = exc
             raise

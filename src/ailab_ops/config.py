@@ -58,6 +58,7 @@ class Settings:
     llm_base_url: str = field(default_factory=lambda: _env_str("AILAB_LLM_BASE_URL", "http://127.0.0.1:8001/v1"))
     llm_api_key: str = field(default_factory=lambda: _env_str("AILAB_LLM_API_KEY", "EMPTY"))
     llm_timeout_s: float = field(default_factory=lambda: _env_float("AILAB_LLM_TIMEOUT_S", 60.0))
+    llm_retry_max_delay_s: float = field(default_factory=lambda: _env_float("AILAB_LLM_RETRY_MAX_DELAY_S", 30.0))
     llm_max_tokens: int = field(default_factory=lambda: _env_int("AILAB_LLM_MAX_TOKENS", 1024))
     # Simulated think time per model call, in milliseconds. Zero by default so
     # the test suite is fast, but a benchmark MUST set this: with an instant

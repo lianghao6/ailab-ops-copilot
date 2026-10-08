@@ -27,7 +27,8 @@ import sys
 class ForbidLegacy(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
         if fullname in {'ailab_ops.llm.mock', 'ailab_ops.signals',
-                        'ailab_ops.serving.service', 'ailab_ops.tools.builtin'}:
+                        'ailab_ops.serving.service', 'ailab_ops.tools.builtin',
+                        'ailab_ops.rag.kb', 'ailab_ops.datagen.taxonomy'}:
             raise AssertionError('default imported legacy module: ' + fullname)
 
 sys.meta_path.insert(0, ForbidLegacy())

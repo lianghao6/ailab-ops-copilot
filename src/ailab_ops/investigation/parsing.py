@@ -126,6 +126,11 @@ def validate_arguments(value: Any, schema: dict, path: str = "arguments") -> Non
     if isinstance(value, list) and isinstance(schema.get("items"), dict):
         for index, item in enumerate(value):
             validate_arguments(item, schema["items"], f"{path}[{index}]")
+    if isinstance(value, str):
+        if "minLength" in schema and len(value) < schema["minLength"]:
+            raise ControlError(f"invalid arguments: {path} is below minLength")
+        if "maxLength" in schema and len(value) > schema["maxLength"]:
+            raise ControlError(f"invalid arguments: {path} is above maxLength")
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         if "minimum" in schema and value < schema["minimum"]:
             raise ControlError(f"invalid arguments: {path} is below minimum")

@@ -59,15 +59,25 @@ class AuthoringGateway:
         self.index += 1
         if index == 0:
             response = LLMResponse(content=json.dumps({"type": "plan", "plan": [
-                "Read case context and telemetry coverage", "Compare worker logs and metric chronology", "Report only cited findings"]}))
+                "Read case context and telemetry coverage", "Compare worker logs and metric chronology",
+                "Search independent Runbooks using observed signals", "Report only cited findings"]}))
         elif index == 1:
             response = LLMResponse(tool_calls=[ToolCall(f"read-{i}", name, {"case_id": self.case_id})
                 for i, name in enumerate(["get_case_snapshot", "get_case_logs", "get_case_metrics"])], finish_reason=FinishReason.TOOL_CALLS)
+        elif index == 2:
+            # This fixture author's query is derived solely from the observation
+            # already returned to the model, never from a case label or root.
+            logs = next(json.loads(message.content)["data"]["rows"] for message in messages
+                        if message.role == "tool" and message.name == "get_case_logs")
+            signals = [row["message"] for row in logs if row["level"] in {"WARNING", "ERROR"}]
+            query = " ".join(signals[:3])[:1000]
+            response = LLMResponse(tool_calls=[ToolCall("read-runbooks", "search_runbooks", {"query": query, "top_k": 1})],
+                                   finish_reason=FinishReason.TOOL_CALLS)
         else:
             ids = [item["evidence_id"] for message in messages if message.role == "tool"
                    for item in json.loads(message.content)["evidence_items"]]
             report = REPORTS[self.case_id]
-            if index == 2:
+            if index == 3:
                 response = LLMResponse(content=json.dumps({"type": "hypotheses", "hypotheses": [{
                     "hypothesis_id": "h1", "title": report["summary"], "confidence": report["confidence"],
                     "supporting_evidence_ids": ids}]}))
