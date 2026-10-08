@@ -373,6 +373,165 @@ def test_chapter_four_redaction_observation_is_real_presentation_boundary(chapte
 
 
 @pytest.fixture(scope="module")
+def chapter_six(tmp_path_factory):
+    module = importlib.import_module("lessons.l6")
+    path = deck.build(module.LESSON, tmp_path_factory.mktemp("chapter-six") / "lesson-6.pdf")
+    reader = PdfReader(path)
+    return module, reader, "\n".join(page.extract_text() for page in reader.pages)
+
+
+def test_chapter_six_publishes_service_boundaries_and_current_sources(chapter_six):
+    module, reader, text = chapter_six
+    assert reader.metadata.title == "第 6 课 · 从 Demo 到企业级服务"
+    for fact in ("人工编写回放", "authored replay", "进程内", "未经认证", "有界队列",
+                 "公平", "QPS", "Retry-After", "缓存", "熔断", "恢复 API", "SSE",
+                 "多实例", "持久化", "真实执行", "在线浏览器", "课后复现"):
+        assert fact in text
+    for old in ("答辩与模拟面试", "口语化讲稿", "实操 1", "kill the model service"):
+        assert old not in text
+    assert any(isinstance(b, deck.SequenceDiagram) for b in module.LESSON.blocks)
+    assert any(isinstance(b, deck.Diagram) for b in module.LESSON.blocks)
+    sources = [b for b in module.LESSON.blocks if isinstance(b, deck.Source)]
+    assert sources
+    for source in sources:
+        path = ROOT / source.path
+        assert path.is_file(), source.path
+        assert source.path in text
+        if path.suffix == ".py" and source.symbol:
+            names = {n.name for n in ast.walk(ast.parse(path.read_text()))
+                     if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+            assert source.symbol.split(".")[-1] in names, source
+    for index, block in enumerate(module.LESSON.blocks[:-1]):
+        if isinstance(block, deck.Code) and block.caption.startswith("源码摘录"):
+            source = module.LESSON.blocks[index + 1]
+            assert isinstance(source, deck.Source)
+            excerpt = [line.strip() for line in block.text.strip().splitlines()]
+            actual = [line.strip() for line in (ROOT / source.path).read_text().splitlines()]
+            assert any(actual[j:j + len(excerpt)] == excerpt for j in range(len(actual))), block.caption
+
+
+def test_chapter_six_complete_api_and_approval_observation_is_repeatable(chapter_six):
+    from fastapi.testclient import TestClient
+    from ailab_ops.config import Settings
+    from ailab_ops.runtime import build_runtime
+    from ailab_ops.serving.app import create_app
+    module, _, _ = chapter_six
+    assert hasattr(module, "SERVICE_OBSERVATION"), "service example needs observed provenance"
+    rt = build_runtime(Settings(model_mode="replay", llm_api_key="", user_qps=0))
+    with TestClient(create_app(rt)) as client:
+        response = client.post("/v2/investigations", json={"case_id": "case-gpu-assert"})
+        view = response.json()
+        base = "/v2/investigations/" + view["session_id"]
+        cross = client.get(base, params={"tenant_id": "another-tenant"})
+        request = client.post(base + "/approvals", json={"proposal": {
+            **module.ACTION_PROPOSAL, "evidence_ids": view["evidence_ids"]}}).json()
+        apath = "/v2/approvals/" + request["request_id"]
+        before = client.post(apath + "/execute", json={"actor": "operator"})
+        client.post(apath + "/approve", json={"actor": "reviewer"}).raise_for_status()
+        approved = client.get(apath).json()
+        execution = client.post(apath + "/execute", json={"actor": "operator"}).json()
+        final = client.get(base).json()
+        health = client.get("/v2/health").json()
+        timeline = client.get(base + "/timeline", params={"limit": 2}).json()
+        actual = {"http": response.status_code, "phase": view["phase"],
+            "root_cause": view["report"]["root_cause"], "evidence_count": len(view["evidence"]),
+            "steps_used": view["budget"]["steps_used"], "tokens_used": view["budget"]["tokens_used"],
+            "cross_tenant_http": cross.status_code, "before_approval_http": before.status_code,
+            "approved_status": approved["status"], "final_status": final["approvals"][0]["status"],
+            "simulated": execution["simulated"], "report_unchanged": final["report"] == view["report"],
+            "gate_admitted": health["gate"]["admitted"], "gate_in_flight": health["gate"]["in_flight"],
+            "cache": health["cache"], "storage": health["storage"], "identity": health["identity"],
+            "timeline_returned": timeline["returned_events"], "timeline_truncated": timeline["truncated"]}
+        assert actual == module.SERVICE_OBSERVATION
+
+
+def test_chapter_six_upstream_failure_uses_real_retry_breaker_and_public_error(chapter_six):
+    import httpx
+    from fastapi.testclient import TestClient
+    from ailab_ops.config import Settings
+    from ailab_ops.models.openai import OpenAIModelGateway
+    from ailab_ops.runtime import build_runtime
+    from ailab_ops.serving.app import create_app
+    module, _, _ = chapter_six
+    assert hasattr(module, "OUTAGE_OBSERVATION"), "failure scenario needs measured outputs"
+    attempts = []
+    def unavailable(request):
+        attempts.append(request)
+        return httpx.Response(503, headers={"Retry-After": "0"}, json={"error": "controlled outage"})
+    gateway = OpenAIModelGateway("https://model.invalid/v1", "controlled-test", "test-secret",
+        transport=httpx.MockTransport(unavailable), max_retries=2, backoff_base_s=0)
+    rt = build_runtime(Settings(model_mode="online", user_qps=0), gateway=gateway)
+    with TestClient(create_app(rt)) as client:
+        rows = []
+        for _ in range(6):
+            result = client.post("/v2/investigations", json={"case_id": "case-gpu-assert"})
+            view = result.json()
+            rows.append({"http": result.status_code, "phase": view["phase"],
+                "stop_reason": view["stop_reason"], "kind": view["error"]["kind"],
+                "retry_after_header": result.headers["Retry-After"],
+                "report": view["report"], "evidence_count": len(view["evidence"]),
+                "upstream_attempts_so_far": len(attempts)})
+            # Every failed session remains readable; none is silently replayed.
+            retained = client.get("/v2/investigations/" + view["session_id"]).json()
+            assert retained["mode"] == "online" and retained["phase"] == "stopped"
+        health = client.get("/v2/health").json()
+        actual = {"runs": rows, "health_status": health["status"],
+                  "breaker_state": health["breakers"]["model"]["state"],
+                  "breaker_failures": health["breakers"]["model"]["failures"],
+                  "gate_in_flight": health["gate"]["in_flight"]}
+        assert actual == module.OUTAGE_OBSERVATION
+
+
+def test_chapter_six_queue_observation_preserves_admission_and_bounded_queue(chapter_six):
+    import asyncio
+    from ailab_ops.serving.gate import UpstreamGate, GateRejected
+    module, _, _ = chapter_six
+    assert hasattr(module, "QUEUE_OBSERVATION")
+    async def scenario():
+        gate = UpstreamGate(max_concurrency=1, queue_maxsize=1)
+        await gate.acquire()
+        waiting = asyncio.create_task(gate.acquire())
+        await asyncio.sleep(0)
+        occupied = {"in_flight": gate.in_flight, "queued": gate.queued}
+        with pytest.raises(GateRejected):
+            await gate.acquire()
+        await gate.release()
+        await waiting
+        handoff = {"in_flight": gate.in_flight, "queued": gate.queued}
+        await gate.release()
+        return {"occupied": occupied, "handoff": handoff, "admitted": gate.admitted,
+                "rejected_queue_full": gate.rejected_queue_full, "final_in_flight": gate.in_flight}
+    assert asyncio.run(scenario()) == module.QUEUE_OBSERVATION
+
+
+def test_chapter_six_regression_summary_matches_current_cli(chapter_six):
+    module, _, _ = chapter_six
+    assert hasattr(module, "REGRESSION_OBSERVATION")
+    result = subprocess.run([sys.executable, "-m", "ailab_ops.cli", "eval", "--mode", "replay"],
+                            cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    actual = {"runs": len(payload["runs"]), "provenance": payload["provenance"],
+              "root_cause_mean": payload["summary"]["root_cause"]["mean"],
+              "citation_mean": payload["summary"]["citation_validity"]["mean"],
+              "tool_choice_mean": payload["summary"]["tool_choice"]["mean"]}
+    assert actual == module.REGRESSION_OBSERVATION
+
+
+def test_chapter_six_after_class_commands_execute_as_printed(chapter_six):
+    module, _, _ = chapter_six
+    commands = next(b.text for b in module.LESSON.blocks
+                    if isinstance(b, deck.Code) and b.caption.startswith("课后复现："))
+    result = subprocess.run(["bash", "-e", "-c", commands], cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    decoder = json.JSONDecoder()
+    investigation, end = decoder.raw_decode(result.stdout.lstrip())
+    evaluation, _ = decoder.raw_decode(result.stdout.lstrip()[end:].lstrip())
+    assert investigation["mode"] == "replay" and investigation["phase"] == "completed"
+    assert evaluation["mode"] == "replay" and len(evaluation["runs"]) == 3
+
+
+@pytest.fixture(scope="module")
 def chapter_five(tmp_path_factory):
     module = importlib.import_module("lessons.l5")
     path = deck.build(module.LESSON, tmp_path_factory.mktemp("chapter-five") / "lesson-5.pdf")
