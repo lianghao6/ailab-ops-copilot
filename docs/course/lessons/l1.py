@@ -228,8 +228,12 @@ LESSON = Lesson(
           "控制层把观察登记到 EvidenceStore，并把带 ID 的证据放入回喂 payload。"
           "失败时，模型得到错误和可能的修正提示，而不是一段冒充成功结果的文本。"
           "下一轮应依据实际返回决定继续调查或说明缺口。"),
-        Code('session.messages.append(ChatMessage("tool", json.dumps(payload, ensure_ascii=False, default=str),\n'
-             '                                    name=call.name, tool_call_id=call.id))', caption="源码摘录：工具返回消息，保留请求关联"),
+        Code('session.messages.append(\n'
+             '    ChatMessage(\n'
+             '        "tool", json.dumps(payload, ensure_ascii=False, default=str),\n'
+             '        name=call.name, tool_call_id=call.id,\n'
+             '    )\n'
+             ')', caption="阅读示意：工具返回表达式重新分行，保留请求关联与原行为"),
         Source("src/ailab_ops/investigation/orchestrator.py", "_tool_feedback"),
         P("EvidenceStore 使用来源工具、调用参数和原文摘录生成稳定标识。同一次观察可以被后续主张反复引用，"
           "不必靠重新粘贴日志来证明出处。当前日志工具生成的是整批保留日志的一份证据，"

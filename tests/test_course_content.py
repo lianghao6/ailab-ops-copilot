@@ -115,7 +115,7 @@ def test_chapter_two_publishes_control_contract_and_current_phase_names(chapter_
         assert field in text
     for concept in ("动态计划", "停止条件", "duplicate_call", "幂等", "错误回喂",
                     "Retry-After", "上下文", "证据索引", "进程重启", "人工编写回放", "课后阅读"):
-        assert concept in text
+        assert concept in re.sub(r"\s+", "", text)
     assert any(isinstance(block, deck.Diagram) for block in module.LESSON.blocks)
     assert any(isinstance(block, deck.SequenceDiagram) for block in module.LESSON.blocks)
     for stale in ("口语化讲稿", "小面试", "实操 60", "亲手拆掉", "src/ailab_ops/agent/loop.py"):

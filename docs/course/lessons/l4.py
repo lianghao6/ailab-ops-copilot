@@ -92,7 +92,7 @@ LESSON = Lesson(4, "安全边界与人工审批", "从 GPU assert 报告走到�
       "记录幂等声明。只有 kind 直接决定读写类别。写入 sensitivity='internal' 不会自动"
       "获得租户权限检查，也不会自动对每个输出字段脱敏。"),
     Grid(["类别", "当前实例", "控制路径"], [
-        ["read", "get_case_job / get_case_logs / get_case_metrics", "参数校验与策略允许后读取"],
+        ["read", "get_case_snapshot / get_case_logs / get_case_metrics", "参数校验与策略允许后读取"],
         ["read", "search_runbooks", "检索知识；仍需核查来源和完整性"],
         ["action", "annotate_incident", "创建审批；普通调度路径不执行"],
     ], widths=[1, 5, 4]),

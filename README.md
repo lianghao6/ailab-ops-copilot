@@ -2,6 +2,20 @@
 
 面向训练与评测故障的证据调查平台。模型通过只读工具读取独立案例并检索 V2 Runbook，维护计划和假设，输出带证据引用的报告。动作必须先提出申请、人工批准，再显式执行；当前执行全部为模拟。
 
+## 六课项目教材
+
+面向有 Python 基础、尚未做过 LLM/Agent 的读者，课堂由教师带读现成代码和运行演示，
+课后按自己的节奏复习与模仿。教材为 A4 知识型项目阅读，课程不限定时长。
+六章依次讲 LLM 到 Agent、调查控制、RAG 与证据、安全与审批、分层评测和企业服务。
+
+[六课合订本](docs/course/pdf/enterprise-incident-agent-v2.pdf) ·
+[第 1 课](docs/course/pdf/lesson-1.pdf) · [第 2 课](docs/course/pdf/lesson-2.pdf) ·
+[第 3 课](docs/course/pdf/lesson-3.pdf) · [第 4 课](docs/course/pdf/lesson-4.pdf) ·
+[第 5 课](docs/course/pdf/lesson-5.pdf) · [第 6 课](docs/course/pdf/lesson-6.pdf)。
+[教材构建与维护](docs/course/README.md)和[教师带读提示](docs/course/TEACHING_NOTES.md)分别说明
+源文件、出版检查和逐章讲解路线。运行 `python3 docs/course/build.py` 可重新生成七份 PDF，
+`python3 scripts/qa_course_pdfs.py` 检查 A4、字体、文字、源码与关键事实。
+
 ## 在线快速开始
 
 需要 Python 3.10+。默认模型模式为 `online`，启动时必须配置模型和密钥：
@@ -120,7 +134,9 @@ Replay 得分检查录制轨迹及工程契约，**不能说明模型能力、�
 
 `investigate`、`demo`、`ask`、`eval` 和 `serve` 都使用 V2；`eval-v2` 保留为 `eval` 的兼容别名。直接 CLI 默认 online，必须配置模型和密钥；显式 `replay` 或 `--mode replay` 是默认产品唯一无需 key 的推理模式。`make demo` 明确调用 replay，`make serve` / `make eval` 默认 online，可传 `MODE=replay`。
 
-V1 工具统一改为 `ailab-ops legacy <command>`，Make 对应 `legacy-*`，标为不支持的临时回归入口，课程发布前移除。历史版本、保留模块与旧课程适用范围见 [V1 历史说明](docs/legacy-v1.md)。
+V1 工具统一使用 `ailab-ops legacy <command>`，Make 对应 `legacy-*`，是不支持的历史实验入口。
+第 3 课仅用它复核标明来源的 V1 检索基线。历史版本与保留模块范围见
+[V1 历史说明](docs/legacy-v1.md)。默认项目与六课教材都使用 V2。
 
 默认 `/` 提供 V2 调查工作台，与 V2 API 和 CLI 共用运行时；V1 界面仅保留在 legacy 入口。非 editable 安装需部署仓库的 data/v2 资产并适配数据根路径，目前推荐源代码或 editable 安装。
 

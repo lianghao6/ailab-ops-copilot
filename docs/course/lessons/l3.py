@@ -438,32 +438,28 @@ LESSON = Lesson(
           "评价 RAG 时，既要知道所需文档有没有进候选，也要知道输出有没有忠实使用它，以及结论是否超出资料证明范围。"),
 
         H1("3.13 本章总结与课后阅读", anchor="after-class"),
-        P("RAG 提供外部资料；证据链连接本次观察、知识来源和报告主张。观察后检索提升查询信息量，独立知识/标签目录"
-          "避免运行时直接泄漏答案。词法、向量、融合和重排各有薄弱处；V1 基线展示弱组件可能拉低排序，"
-          "却没有给 V2 或真正 embedding 下定论。"),
-        P("稳定 ID 帮助定位，不证明原始信息真实；truncated 和 telemetry 回答不同问题。当前控制层检查 material Claim"
-          "的引用存在、重复及会话范围，不证明语义支持。资料缺失时应输出有边界的事实和补证方向，在线模型能否做到仍需评测。"),
+        P("RAG 补充外部资料，证据链连接观察、来源与主张。观察后检索提高查询信息量，知识与标签隔离避免答案泄漏。"
+          "检索与融合需分层评测；V1 弱组件反例不能外推为 V2 或训练式 embedding 的结论。"),
+        P("稳定 ID 帮助定位；truncated 与 telemetry 区分裁切和源头缺失。引用检查不证明语义支持；"
+          "资料不足时保留事实与补证方向，在线能力仍需评测。"),
         H2("一条建议的源码阅读路线"),
         Numbered([
-            "从 tools/runbooks.py 读 _terms 与 build_runbook_tool，手算 query score，再比较 QUERY_OBSERVATIONS。",
-            "看 tools/cases.py 与案例 telemetry，区分保留行、源头缺失和工具裁切。",
-            "读 evidence/models.py、store.py，找出参与 ID 的字段和首次插入语义。",
-            "读 evidence/validation.py 与 orchestrator._report，列出能拦住和拦不住的错误。",
-            "对照两个回放的 claims / unknowns，再看 V1 rag/store.py，区分当前工具与历史实验。",
+            "tools/runbooks.py：手算 score，对照 QUERY_OBSERVATIONS。",
+            "tools/cases.py：区分源头缺失与工具裁切。",
+            "evidence/models.py、store.py：找出 ID 字段与首次插入语义。",
+            "evidence/validation.py、orchestrator._report：列出能拦住和漏掉的错误。",
+            "对照两次回放的 claims / unknowns 与历史 rag/store.py。",
         ]),
         Source("src/ailab_ops/evidence/validation.py", "validate_report"),
         H2("课后模仿方向与思考"),
-        P("课后先复跑已有命令，任选一条 Claim，将 evidence_ids 对照 evidence 数组，找到有关原文。"
-          "用纸面检查表记录：支持哪部分结论、覆盖什么时间、还有哪些缺口。再尝试为熟悉的 Python 报错写简短 Runbook，"
-          "包含症状、辨别条件、补证步骤和适用边界；不要把测试题的答案标签放进去。"),
+        P("课后任选一条 Claim，按 evidence_ids 核对原文、时间与缺口。模仿熟悉的 Python 报错写 Runbook，"
+          "包含症状、辨别条件、补证步骤和边界，不放测试答案。"),
         Numbered([
-            "检索第一名 score 从 4 变 8，为什么不能直接把根因 confidence 提高一倍？",
-            "工具返回空 rows、truncated=False、complete=False，哪些否定性结论不成立？",
-            "怎样证明 embedding 帮助中文释义查询，同时没降低精确错误串排序？需要怎样分组数据？",
-            "material Claim 引用合法日志却写错原因，当前校验怎样处理？如何设计独立语义审查？",
-            "两篇文档矛盾时，需要哪些版本和来源信息才能决定适用性？",
-            "证据不足报告为何可以 completed？它和 stopped 的预算中断有什么不同？",
+            "score 加倍为什么不意味着 confidence 加倍？合法引用但根因写错时，当前校验能保证什么？",
+            "空 rows、truncated=False、complete=False 能否证明没有异常？为何证据不足可以 completed？",
+            "怎样分组评测 embedding 的中文释义与精确错误串表现，避免总体均值掩盖退化？",
+            "文档互相矛盾时，怎样核查版本、来源与适用条件，再做独立语义审查？",
         ]),
-        ChapterRef(4, "下一章将带引用建议接到策略与审批，解释建议、批准与执行的边界。"),
+        ChapterRef(4, "将带引用建议接到策略与审批。"),
     ],
 )

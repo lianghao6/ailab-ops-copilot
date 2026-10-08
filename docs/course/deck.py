@@ -15,7 +15,7 @@ from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import BaseDocTemplate, Flowable, Frame, Image, PageBreak, PageTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import BaseDocTemplate, Flowable, Frame, Image, KeepTogether, PageBreak, PageTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.platypus.tableofcontents import TableOfContents
 
 FONT_DIR = Path(__file__).with_name("fonts")
@@ -26,7 +26,7 @@ BODY_SIZE = 10.5
 
 
 def register_fonts():
-    for name, filename in ((SANS, "NotoSansSC.ttf"), (MONO, "JetBrainsMono.ttf")):
+    for name, filename in ((SANS, "NotoSansSC-Regular.ttf"), (MONO, "JetBrainsMono.ttf")):
         if name not in pdfmetrics.getRegisteredFontNames():
             pdfmetrics.registerFont(TTFont(name, str(FONT_DIR / filename)))
         pdfmetrics.registerFontFamily(name, normal=name, bold=name, italic=name, boldItalic=name)
@@ -162,14 +162,15 @@ def _styles():
         "h1": style("h1", 15, 23, spaceBefore=15, spaceAfter=8, keepWithNext=True),
         "h2": style("h2", 12, 19, spaceBefore=10, spaceAfter=5, keepWithNext=True),
         "body": style("body", BODY_SIZE, 17.5, spaceAfter=8),
-        "bullet": style("bullet", BODY_SIZE, 17, leftIndent=15, bulletIndent=2, spaceAfter=4),
+        "bullet": style("bullet", BODY_SIZE, 17, leftIndent=15, bulletIndent=2,
+                        bulletFontName=SANS, bulletFontSize=BODY_SIZE, spaceAfter=4),
         "table": style("table", 9, 14),
         "caption": style("caption", 9, 14, spaceAfter=6),
         "code": ParagraphStyle("code", fontName=MONO, fontSize=8, leading=12, textColor=INK, splitLongWords=True),
         "note": style("note", 10, 16),
-        "toc0": style("toc0", 12, 19, spaceBefore=9),
-        "toc1": style("toc1", 10, 16, leftIndent=14, spaceBefore=3),
-        "toc2": style("toc2", 9, 14, leftIndent=28),
+        "toc0": style("toc0", 12, 18, spaceBefore=6),
+        "toc1": style("toc1", 10, 15, leftIndent=14, spaceBefore=1.5),
+        "toc2": style("toc2", 9, 13.5, leftIndent=28),
     }
 
 
@@ -397,7 +398,12 @@ def _render(block, st, chapter, index):
     if isinstance(block, Note):
         return [_note(block.text, block.kind, st)]
     if isinstance(block, Grid):
-        return [_table(block.header, block.rows, block.widths, st), Spacer(1, 10)]
+        table = _table(block.header, block.rows, block.widths, st)
+        # Keep compact comparisons intact; long tables still repeat headers and
+        # can split inside an oversized row.
+        if table.wrap(WIDTH, 1000)[1] <= 350:
+            table = KeepTogether([table])
+        return [table, Spacer(1, 10)]
     if isinstance(block, Source):
         return [_paragraph(f"源码定位：{block.path}" + (f" · {block.symbol}" if block.symbol else ""), st["caption"])]
     if isinstance(block, ChapterRef):
@@ -431,6 +437,10 @@ def publish(lessons, out_path, *, title, subtitle="项目配套阅读 · 有 Pyt
     toc = TableOfContents()
     toc.levelStyles = [st["toc0"], st["toc1"], st["toc2"]]
     toc.dotsMinLevel = 0
+    toc.tableStyle = TableStyle([("LEFTPADDING", (0, 0), (-1, -1), 0),
+                                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                                ("TOPPADDING", (0, 0), (-1, -1), 0),
+                                ("BOTTOMPADDING", (0, 0), (-1, -1), 1)])
     story.extend([toc, PageBreak()])
     for position, lesson in enumerate(lessons):
         if position and not isinstance(story[-1], PageBreak):
@@ -438,6 +448,7 @@ def publish(lessons, out_path, *, title, subtitle="项目配套阅读 · 有 Pyt
         story.extend([_heading(f"第 {lesson.number} 课 · {lesson.title}", 0, f"chapter-{lesson.number}", st),
                       _paragraph(lesson.subtitle, st["subtitle"]), Spacer(1, 15)])
         has_h1, anchors = False, set()
+        rendered = []
         for index, block in enumerate(lesson.blocks):
             if isinstance(block, (H1, H2)):
                 anchor = str(block.anchor or index)
@@ -448,10 +459,50 @@ def publish(lessons, out_path, *, title, subtitle="项目配套阅读 · 有 Pyt
                 raise ValueError("H2 must follow an H1 within its chapter")
             if isinstance(block, H1):
                 has_h1 = True
-            for flow in _render(block, st, lesson.number, index):
+            rendered.append((block, _render(block, st, lesson.number, index)))
+        # Source locators belong to the preceding explanation/listing. Group a
+        # modest related sequence, not a whole section: oversized material must
+        # retain normal splitting rather than creating a blank page or overflow.
+        index = 0
+        while index < len(rendered):
+            block, flows = rendered[index]
+            group = list(flows)
+            end = index + 1
+            while end < len(rendered) and isinstance(rendered[end][0], Source):
+                group.extend(rendered[end][1])
+                end += 1
+            if (end > index + 1 or isinstance(block, (Code, Source))) and end < len(rendered) and isinstance(rendered[end][0], P):
+                group.extend(rendered[end][1])
+                end += 1
+                # A locator may follow the explanation instead of the listing.
+                # Consuming that P must not leave its own Sources ungrouped.
+                while end < len(rendered) and isinstance(rendered[end][0], Source):
+                    group.extend(rendered[end][1])
+                    end += 1
+            # KeepTogether's wrap intentionally returns an enormous sentinel.
+            # Flatten its compact table wrapper for the actual height estimate.
+            flat = []
+            for flow in group:
+                flat.extend(flow._content if isinstance(flow, KeepTogether) else [flow])
+            height = sum(flow.wrap(WIDTH, 10000)[1] + flow.getSpaceBefore() + flow.getSpaceAfter()
+                         for flow in flat if not isinstance(flow, PageBreak))
+            if end > index + 1 and height <= 600 and not any(isinstance(f, PageBreak) for f in flat):
+                output = [KeepTogether(flat)]
+            else:
+                output = group
+            if output and isinstance(output[0], KeepTogether):
+                # ReportLab nests keepWithNext headings around KeepTogether,
+                # then can split off the heading. Use one flat group instead.
+                preceding = []
+                while story and hasattr(story[-1], "book_heading"):
+                    preceding.insert(0, story.pop())
+                if preceding:
+                    output = [KeepTogether(preceding + output[0]._content)] + output[1:]
+            for flow in output:
                 if isinstance(flow, PageBreak) and isinstance(story[-1], PageBreak):
                     continue
                 story.append(flow)
+            index = end
     while isinstance(story[-1], PageBreak):
         story.pop()
     out = Path(out_path)

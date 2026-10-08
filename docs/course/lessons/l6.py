@@ -231,6 +231,9 @@ LESSON = Lesson(6, "从 Demo 到企业级服务", "让调查、资源与责任�
     Source("tests/test_v2_runtime.py", "test_cancelled_gate_handoff_returns_slot_to_next_waiter"),
 
     H1("限流与配额：四个不同的问题", anchor="limits"),
+    Term("QPS、令牌桶与 burst", "QPS 是每秒请求数，这里限制用户发起调查的速率。令牌桶（token bucket）"
+         "把可接纳的请求名额想成桶里的令牌：每个请求取走一枚，系统按 QPS 持续补充，桶满后不再累积。"
+         "burst 是突发容量，即桶最多保存多少枚。这里的令牌是请求名额，与 LLM 文本 token 不是同一单位。"),
     P("闸门保护全进程模型容量，RateLimiter 则区分用户、租户和费用。入口 check_request 检查已结算"
       "当天费用，占用租户调查并发额度，再检查用户 QPS 与已有 token 窗口。完成或失败均 release_request。"
       "租户并发覆盖整条调查，包括排队；闸门并发覆盖当前步骤。某租户暂时没有模型调用，也可能因为很多"
