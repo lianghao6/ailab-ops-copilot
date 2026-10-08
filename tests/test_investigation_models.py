@@ -70,6 +70,20 @@ def test_hypothesis_tracks_support_and_contradiction_without_duplicates():
     assert Hypothesis(hypothesis_id="h2", title="Node failed").supporting_evidence_ids == []
 
 
+@pytest.mark.parametrize("restore", [False, True], ids=["construct", "restore"])
+def test_hypothesis_initial_evidence_ids_are_deduplicated_in_order(restore):
+    payload = {
+        "hypothesis_id": "h1", "title": "OOM",
+        "supporting_evidence_ids": ["e2", "e1", "e2", "e3", "e1"],
+        "contradicting_evidence_ids": ["e3", "e2", "e3", "e1", "e2"],
+    }
+    hypothesis = Hypothesis.from_dict(payload) if restore else Hypothesis(**payload)
+    assert hypothesis.supporting_evidence_ids == ["e2", "e1", "e3"]
+    assert hypothesis.contradicting_evidence_ids == ["e3", "e2", "e1"]
+    assert payload["supporting_evidence_ids"] == ["e2", "e1", "e2", "e3", "e1"]
+    assert payload["contradicting_evidence_ids"] == ["e3", "e2", "e3", "e1", "e2"]
+
+
 def test_state_round_trip_preserves_phase_and_report():
     report = InvestigationReport(
         root_cause="GPU memory exhausted", confidence=0.9, summary="Allocator failed",

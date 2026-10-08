@@ -65,6 +65,8 @@ class Hypothesis:
     def __post_init__(self) -> None:
         if not 0.0 <= self.confidence <= 1.0:
             raise ValueError("confidence must be between 0 and 1")
+        self.supporting_evidence_ids = list(dict.fromkeys(self.supporting_evidence_ids))
+        self.contradicting_evidence_ids = list(dict.fromkeys(self.contradicting_evidence_ids))
 
     def add_support(self, evidence_id: str) -> None:
         if evidence_id not in self.supporting_evidence_ids:
