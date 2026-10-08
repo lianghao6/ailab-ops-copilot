@@ -192,3 +192,86 @@ def test_malformed_tool_metadata_scores_zero_instead_of_crashing():
     state, _, label = fixture()
     result = score_investigation(state, label, events=[{"kind": "tool", "tool": ["read_logs"]}])
     assert result.tool_choice == 0 and "invalid_tool_metadata" in result.issues
+
+
+@pytest.mark.parametrize("event", [
+    {"kind": "approval"}, {"kind": "approval", "event": "invented", "approval_id": "a1"},
+    {"kind": "approval", "event": "approved", "approval_id": None},
+    {"kind": "approval", "event": "approved", "approval_id": " "},
+    {"kind": "approval", "event": "approved", "approval_id": 42},
+    {"kind": "approval", "event": "executed", "approval_id": False},
+    {"kind": "approval", "event": "created", "approval_id": []},
+])
+def test_malformed_approval_schema_scores_zero_with_issue(event):
+    from ailab_ops.evals import score_investigation
+    state, _, label = fixture()
+    result = score_investigation(state, label, events=[event])
+    assert result.policy_compliance == 0
+    assert "invalid_approval_event" in result.issues
+
+
+@pytest.mark.parametrize("name", ["tracing_failed", "notification_failed"])
+def test_diagnostic_approval_events_alone_cannot_prove_policy_compliance(name):
+    from ailab_ops.evals import score_investigation
+    state, _, label = fixture()
+    result = score_investigation(state, label, events=[{"kind": "approval", "event": name}])
+    assert result.policy_compliance is None
+
+
+@pytest.mark.parametrize("fault", ["budget", "evidence", "event", "latency"])
+def test_malformed_scoring_inputs_preserve_other_verifiable_dimensions(fault):
+    from ailab_ops.evals import score_investigation
+    state, store, label = fixture()
+    class BadRecord:
+        def to_dict(self):
+            return None
+    evidence = store.to_context(state.evidence_ids)
+    events = [{"kind": "policy", "outcome": "allow_read"}]
+    latency = 25
+    if fault == "budget":
+        state.budget = None
+    elif fault == "evidence":
+        evidence = [BadRecord()]
+    elif fault == "event":
+        events = [BadRecord()]
+    else:
+        latency = 10 ** 1000
+    result = score_investigation(state, label, evidence=evidence, events=events, latency_ms=latency)
+    assert result.root_cause == result.abstention == 1
+    if fault != "evidence":
+        assert result.required_evidence == .5 and result.citation_validity == 1
+    if fault != "event":
+        assert result.policy_compliance == 1
+    if fault == "budget":
+        assert result.token_use == 0 and "missing_or_invalid_token_use" in result.issues
+    if fault == "latency":
+        assert result.latency == 0 and "missing_or_invalid_latency" in result.issues
+
+
+def test_repeats_do_not_report_factory_failure_for_invalid_scoring_inputs(tmp_path):
+    import json
+    from ailab_ops.evals import EvaluationSample, run_evaluation
+    state, store, label = fixture()
+    path = tmp_path / "labels.jsonl"
+    path.write_text(json.dumps(label) + "\n")
+    evidence = store.to_context(state.evidence_ids)
+    state.budget = None
+    result = run_evaluation(["case-test"], 2, lambda case_id: EvaluationSample(state, evidence,
+        [{"kind": "policy", "outcome": "allow_read"}], 10 ** 1000), labels_path=path)
+    assert result.summary["root_cause"].mean == 1 and result.summary["citation_validity"].mean == 1
+    assert result.summary["token_use"].mean == result.summary["latency"].mean == 0
+    assert all(not any(issue.startswith("factory_failed") for issue in run.issues) for run in result.runs)
+
+
+def test_unexpected_scoring_failure_is_distinct_from_factory_failure(tmp_path, monkeypatch):
+    import json
+    from ailab_ops.evals import runner
+    state, _, label = fixture()
+    path = tmp_path / "labels.jsonl"
+    path.write_text(json.dumps(label) + "\n")
+    def broken_scoring(*args, **kwargs):
+        raise RuntimeError("api_key=do-not-record")
+    monkeypatch.setattr(runner, "score_investigation", broken_scoring)
+    result = runner.run_evaluation(["case-test"], 1, lambda case_id: state, labels_path=path)
+    assert result.runs[0].issues == ["scoring_failed:RuntimeError"]
+    assert "do-not-record" not in str(result.to_dict())

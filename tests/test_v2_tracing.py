@@ -115,3 +115,27 @@ def test_iterable_redaction_configuration_also_applies_to_prefixed_text_keys():
         "message": "private_id=hidden-id client_secret=hidden-client"}))
     encoded = json.dumps(recorder.events[0].to_dict())
     assert "hidden-id" not in encoded and "hidden-client" not in encoded
+
+
+@pytest.mark.parametrize("message,secrets", [
+    ('backend replied: {"api_key": "prefixed-secret", "nested": {"token": "nested-secret"}}',
+     ["prefixed-secret", "nested-secret"]),
+    ("payload={'client_secret': 'repr-secret', 'authorization': 'Basic repr-basic'}",
+     ["repr-secret", "repr-basic"]),
+    ("Request Authorization: Basic dXNlcjpwYXNz", ["dXNlcjpwYXNz"]),
+    ("Headers Cookie: session=first-cookie; csrftoken=second-cookie; other=third-cookie\nstatus=failed",
+     ["first-cookie", "second-cookie", "third-cookie"]),
+])
+def test_embedded_credentials_never_reach_memory_or_jsonl(message, secrets, tmp_path):
+    from ailab_ops.observability import TraceEvent, TraceRecorder
+    recorder = TraceRecorder()
+    recorder.record(TraceEvent("s1", "error", usage={"tokens_in": 11, "tokens_out": 7},
+        payload={"error": message, "normal": "Worker lost heartbeat; retry in 5 seconds"}))
+    memory = json.dumps(recorder.events[0].to_dict())
+    path = tmp_path / "trace.jsonl"
+    recorder.write_jsonl(path)
+    for secret in secrets:
+        assert secret not in memory
+        assert secret not in path.read_text()
+    assert recorder.events[0].usage == {"tokens_in": 11, "tokens_out": 7}
+    assert recorder.events[0].payload["normal"] == "Worker lost heartbeat; retry in 5 seconds"

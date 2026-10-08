@@ -8,7 +8,7 @@ from typing import Callable, Iterable
 
 from ailab_ops.investigation.models import InvestigationState
 
-from .models import EvaluationRun, EvaluationSample, MetricSummary, SCORE_NAMES
+from .models import EvaluationResult, EvaluationRun, EvaluationSample, MetricSummary, SCORE_NAMES
 from .scoring import score_investigation
 
 
@@ -33,6 +33,10 @@ def _summarize(runs) -> dict[str, MetricSummary]:
                                         min(values), max(values), pstdev(values)) if values else
                            MetricSummary(0, None, None, None, None, None))
     return summaries
+
+
+def _failed(case_id: str, issue: str) -> EvaluationResult:
+    return EvaluationResult(case_id, None, **{name: 0.0 for name in SCORE_NAMES}, issues=[issue])
 
 
 def run_evaluation(case_ids: Iterable[str], repeats: int,
@@ -61,6 +65,10 @@ def run_evaluation(case_ids: Iterable[str], repeats: int,
             started = perf_counter()
             try:
                 sample = factory(case_id)
+            except Exception as exc:
+                current.append(_failed(case_id, "factory_failed:" + type(exc).__name__))
+                continue
+            try:
                 elapsed = (perf_counter() - started) * 1000
                 if isinstance(sample, InvestigationState):
                     result = score_investigation(sample, labels[case_id], latency_ms=elapsed)
@@ -70,8 +78,7 @@ def run_evaluation(case_ids: Iterable[str], repeats: int,
                 else:
                     result = score_investigation(None, labels[case_id])
             except Exception as exc:
-                result = score_investigation(None, labels[case_id])
-                result.issues = ["factory_failed:" + type(exc).__name__]
+                result = _failed(case_id, "scoring_failed:" + type(exc).__name__)
             current.append(result)
         runs.extend(current)
         by_case[case_id] = _summarize(current)

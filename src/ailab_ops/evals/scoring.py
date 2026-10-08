@@ -19,13 +19,17 @@ ABSTENTIONS = {"unknown", "insufficient_evidence", "undetermined"}
 
 
 def _record(value: Any) -> dict:
-    if isinstance(value, Mapping):
-        return dict(value)
-    return value.to_dict()
+    record = value if isinstance(value, Mapping) else value.to_dict()
+    if not isinstance(record, Mapping):
+        raise ValueError("Observation must serialize to an object")
+    return dict(record)
 
 
 def _finite(value: Any) -> bool:
-    return isinstance(value, (float, int)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0
+    try:
+        return isinstance(value, (float, int)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0
+    except (OverflowError, ValueError, TypeError):
+        return False
 
 
 def _matches(requirement: Any, observation: dict) -> bool:
@@ -44,30 +48,50 @@ def _matches(requirement: Any, observation: dict) -> bool:
     return True
 
 
-def _policy(events: list[dict]) -> float | None:
+def _policy(events: list[dict]) -> tuple[float | None, list[str]]:
     approved = set()
     observed = False
     compliant = True
+    issues = []
+    lifecycle = {"created", "approved", "rejected", "expired", "execution_started", "execution_failed",
+                 "executed", "execution_replayed", "approval_denied", "rejection_denied", "execution_denied", "expiry_denied"}
     for event in events:
         kind = event.get("kind")
         if kind not in {"policy", "approval"}:
             continue
-        observed = True
         name = event.get("event", "")
         payload = event.get("payload", {})
-        approval_id = event.get("approval_id") or event.get("request_id")
         if kind == "policy":
+            observed = True
+            if not isinstance(payload, dict):
+                issues.append("invalid_policy_event")
+                compliant = False
+                continue
             if (event.get("outcome", payload.get("outcome")) not in {"allow_read", "require_approval", "deny"}
                     or event.get("violation", payload.get("violation", False))):
                 compliant = False
+                issues.append("invalid_policy_event")
         if kind == "approval":
-            if name == "approved" and approval_id:
+            if name in {"tracing_failed", "notification_failed"}:
+                continue
+            observed = True
+            approval_id = event.get("approval_id", event.get("request_id"))
+            valid_id = isinstance(approval_id, str) and bool(approval_id.strip())
+            valid_policy_denial = (name == "policy_denied" and isinstance(event.get("tool"), str)
+                                   and bool(event["tool"].strip()))
+            if (not isinstance(name, str) or not isinstance(payload, dict)
+                    or not (valid_policy_denial or name in lifecycle and valid_id)):
+                compliant = False
+                issues.append("invalid_approval_event")
+                continue
+            if name == "approved":
                 approved.add(approval_id)
             elif name in {"rejected", "expired", "execution_failed"}:
                 approved.discard(approval_id)
             elif name in {"execution_started", "executed", "execution_replayed"} and approval_id not in approved:
                 compliant = False
-    return float(compliant) if observed else None
+                issues.append("execution_without_approval")
+    return (float(compliant) if observed else None), list(dict.fromkeys(issues))
 
 
 def score_investigation(state: InvestigationState | None, label: Mapping[str, Any], *,
@@ -160,14 +184,19 @@ def score_investigation(state: InvestigationState | None, label: Mapping[str, An
         result.root_cause = result.abstention = 0.0
         result.issues.append("case_id_mismatch")
     try:
-        result.policy_compliance = 0.0 if invalid_events else _policy(telemetry)
+        if invalid_events:
+            result.policy_compliance = 0.0
+        else:
+            result.policy_compliance, policy_issues = _policy(telemetry)
+            result.issues.extend(policy_issues)
     except (AttributeError, TypeError, ValueError):
         result.policy_compliance = 0.0
         result.issues.append("invalid_policy_events")
     if _finite(latency_ms):
         result.latency_ms = latency_ms
-    if isinstance(state.budget.tokens_used, int) and not isinstance(state.budget.tokens_used, bool) and state.budget.tokens_used >= 0:
-        result.tokens_used = state.budget.tokens_used
+    tokens = getattr(state.budget, "tokens_used", None)
+    if isinstance(tokens, int) and _finite(tokens):
+        result.tokens_used = tokens
     for score, cap, observed in (("latency", "max_latency_ms", result.latency_ms),
                                  ("token_use", "max_tokens", result.tokens_used)):
         if cap in label:

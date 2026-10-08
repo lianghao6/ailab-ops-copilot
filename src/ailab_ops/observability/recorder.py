@@ -24,7 +24,11 @@ class TraceRecorder:
         names = "|".join("[-_ ]?".join(re.escape(part) for part in re.split(r"[-_ ]", key))
                          for key in fields)
         self._credential_text = re.compile(
-            rf"(?i)\b([a-z0-9_-]*(?:{names}))\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\s,;\"']+)")
+            rf"(?i)\b([a-z0-9_-]*(?:{names}))[\"']?\s*[:=]\s*(?:\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s,;\"']+)")
+        # Headers can contain several whitespace/semicolon-separated secrets.
+        # Clean their entire value before the narrower generic key/value rule.
+        self._header_text = re.compile(
+            r"(?i)\b(authorization|cookie)[\"']?\s*[:=]\s*(?:\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\r\n,\"'}]+)")
         self._secrets = tuple(sorted({secret for secret in secrets if secret}, key=len, reverse=True))
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._events: list[TraceEvent] = []
@@ -70,7 +74,8 @@ class TraceRecorder:
     def _text(self, text: str) -> str:
         for secret in self._secrets:
             text = text.replace(secret, self.REDACTED)
-        text = re.sub(r"(?i)\bBearer\s+[^\s,;\"']+", "Bearer " + self.REDACTED, text)
+        text = self._header_text.sub(r"\1=" + self.REDACTED, text)
+        text = re.sub(r"(?i)\b(Bearer|Basic)\s+[^\s,;\"']+", r"\1 " + self.REDACTED, text)
         text = self._credential_text.sub(r"\1=" + self.REDACTED, text)
         return text
 
