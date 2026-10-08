@@ -138,3 +138,187 @@ asyncio.run(main())
     result = subprocess.run([sys.executable, "-c", program], cwd=PROJECT_ROOT,
         env={**os.environ, "PYTHONPATH": str(PROJECT_ROOT / "src")}, capture_output=True, text=True, timeout=5)
     assert result.returncode == 0, result.stderr
+
+
+class BlockingSuccessfulGateway:
+    """Controlled external model boundary, with genuine normal responses."""
+    mode, model = "online", "successful-blocking-test"
+
+    def __init__(self, *, tool_response=False):
+        import threading
+        self.started, self.release = threading.Event(), threading.Event()
+        self.calls = 0
+        self.tool_response = tool_response
+
+    def complete(self, *args, **kwargs):
+        from ailab_ops.llm.base import FinishReason, LLMResponse, ToolCall, Usage
+        self.calls += 1
+        self.started.set()
+        assert self.release.wait(5), "test must release the model"
+        if self.tool_response:
+            return LLMResponse(tool_calls=[ToolCall("read", "get_case_logs", {"case_id": "case-gpu-assert"})],
+                finish_reason=FinishReason.TOOL_CALLS, usage=Usage(10, 7))
+        return LLMResponse(content='{"type":"plan","plan":["Read observations"]}', usage=Usage(10, 7))
+
+
+async def eventually(predicate):
+    for _ in range(200):
+        if predicate():
+            return
+        await asyncio.sleep(0.005)
+    assert predicate(), "condition did not become true"
+
+
+def test_global_admission_precedes_executor_submission_across_tenants():
+    from concurrent.futures import ThreadPoolExecutor
+    gateway = BlockingSuccessfulGateway()
+    rt = build_runtime(replay_settings(upstream_concurrency=1, queue_maxsize=0), gateway=gateway)
+
+    async def scenario():
+        asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=1))
+        first = asyncio.create_task(rt.investigate(case_id="case-gpu-assert", tenant_id="one", max_steps=1))
+        await eventually(gateway.started.is_set)
+        second = asyncio.create_task(rt.investigate(case_id="case-gpu-assert", tenant_id="two", max_steps=1))
+        try:
+            done, _ = await asyncio.wait([second], timeout=0.2)
+            assert second in done, "request must reject before waiting in the executor queue"
+            assert second.result()["error"]["kind"] == "queue_full"
+            assert gateway.calls == 1
+        finally:
+            gateway.release.set()
+            await asyncio.gather(first, second)
+        assert rt.gate.in_flight == 0
+    try:
+        asyncio.run(scenario())
+    finally:
+        rt.close()
+
+
+def test_cost_is_rechecked_after_queue_wait_before_model_start():
+    gateway = BlockingSuccessfulGateway()
+    rt = build_runtime(replay_settings(upstream_concurrency=1, queue_maxsize=2,
+        tenant_cost_per_day_usd=0.000001, price_input_per_mtok=1), gateway=gateway)
+
+    async def scenario():
+        first = asyncio.create_task(rt.investigate(case_id="case-gpu-assert", max_steps=1))
+        await eventually(gateway.started.is_set)
+        second = asyncio.create_task(rt.investigate(case_id="case-gpu-assert", user_id="two", max_steps=1))
+        try:
+            await eventually(lambda: rt.gate.queued == 1)
+        finally:
+            gateway.release.set()
+        _, rejected = await asyncio.gather(first, second)
+        assert gateway.calls == 1
+        assert rejected["error"]["kind"] == "tenant_cost_exceeded"
+        assert rejected["error"]["retryable"] is False
+        assert rejected["budget"]["tokens_used"] == 0
+        assert rt.gate.in_flight == 0
+        assert rt.limiter.snapshot()["tenants"]["tenant-01"]["in_flight"] == 0
+    try:
+        asyncio.run(scenario())
+    finally:
+        rt.close()
+
+
+def test_queued_deadline_expires_without_starting_a_model_call():
+    gateway = BlockingSuccessfulGateway()
+    rt = build_runtime(replay_settings(upstream_concurrency=1, queue_maxsize=2, queue_timeout_s=2), gateway=gateway)
+
+    async def scenario():
+        first = asyncio.create_task(rt.investigate(case_id="case-gpu-assert", max_steps=1))
+        await eventually(gateway.started.is_set)
+        second = asyncio.create_task(rt.investigate(case_id="case-gpu-assert", user_id="two", deadline_s=0.03))
+        try:
+            done, _ = await asyncio.wait([second], timeout=0.2)
+            assert second in done, "investigation deadline must bound admission wait"
+            expired = second.result()
+            assert expired["stop_reason"] == "budget_exhausted:deadline"
+            assert expired["error"] is None
+            assert expired["budget"]["tokens_used"] == 0
+            assert gateway.calls == 1
+        finally:
+            gateway.release.set()
+            await asyncio.gather(first, second)
+        assert rt.gate.in_flight == rt.gate.queued == 0
+    try:
+        asyncio.run(scenario())
+    finally:
+        rt.close()
+
+
+def test_cancelled_normal_model_response_is_accounted_but_no_tools_or_later_models_run():
+    gateway = BlockingSuccessfulGateway(tool_response=True)
+    rt = build_runtime(replay_settings(upstream_concurrency=1), gateway=gateway)
+
+    async def scenario():
+        task = asyncio.create_task(rt.investigate(case_id="case-gpu-assert"))
+        await eventually(gateway.started.is_set)
+        task.cancel()
+        await asyncio.sleep(0.01)
+        assert rt.gate.in_flight == 1
+        gateway.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        session_id = next(iter(rt.records))
+        result = rt.get_investigation(session_id)
+        assert result["phase"] == "stopped" and result["stop_reason"] == "cancelled"
+        assert result["budget"]["tokens_used"] == 17
+        assert rt.limiter.snapshot()["tenants"]["tenant-01"]["tokens_last_min"] == 17
+        assert gateway.calls == 1
+        assert rt.record(session_id).orchestrator.registry.call_log == []
+        assert rt.gate.in_flight == 0
+    try:
+        asyncio.run(scenario())
+    finally:
+        gateway.release.set()
+        rt.close()
+
+
+def test_cancellation_removes_queued_investigation_immediately():
+    gateway = BlockingSuccessfulGateway()
+    rt = build_runtime(replay_settings(upstream_concurrency=1, queue_maxsize=1), gateway=gateway)
+
+    async def scenario():
+        first = asyncio.create_task(rt.investigate(case_id="case-gpu-assert", max_steps=1))
+        await eventually(gateway.started.is_set)
+        second = asyncio.create_task(rt.investigate(case_id="case-gpu-assert", tenant_id="two"))
+        try:
+            await eventually(lambda: rt.gate.queued == 1)
+            second.cancel()
+            done, _ = await asyncio.wait([second], timeout=0.2)
+            assert second in done, "queued cancellation must not wait for the current model"
+            with pytest.raises(asyncio.CancelledError):
+                await second
+            assert rt.gate.queued == 0 and rt.gate.in_flight == 1
+            assert rt.limiter.snapshot()["tenants"]["two"]["in_flight"] == 0
+            session_id = next(sid for sid, record in rt.records.items() if record.tenant_id == "two")
+            assert rt.get_investigation(session_id, "two")["stop_reason"] == "cancelled"
+        finally:
+            gateway.release.set()
+            await asyncio.gather(first, second, return_exceptions=True)
+        assert gateway.calls == 1 and rt.gate.in_flight == 0
+    try:
+        asyncio.run(scenario())
+    finally:
+        rt.close()
+
+
+def test_cancelled_gate_handoff_returns_slot_to_next_waiter():
+    from ailab_ops.serving.gate import UpstreamGate
+
+    async def scenario():
+        gate = UpstreamGate(max_concurrency=1, queue_maxsize=2)
+        await gate.acquire()
+        cancelled = asyncio.create_task(gate.acquire())
+        following = asyncio.create_task(gate.acquire())
+        await eventually(lambda: gate.queued == 2)
+        await gate.release()
+        # The Future owns the slot, but acquire() has not resumed yet.
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+        await asyncio.wait_for(following, timeout=0.2)
+        assert gate.in_flight == 1 and gate.queued == 0
+        await gate.release()
+        assert gate.in_flight == 0
+    asyncio.run(scenario())

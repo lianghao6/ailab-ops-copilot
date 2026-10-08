@@ -9,13 +9,14 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from functools import partial
+from threading import Event
 from uuid import uuid4
 
 from .approvals import SimulatedActionHandler
 from .cases.loader import load_case
 from .config import Settings
 from .investigation import Budget, InvestigationOrchestrator, InvestigationPhase
+from .investigation.orchestrator import InvestigationInterrupted
 from .llm.base import approx_tokens
 from .models import ModelBackendError, build_model_gateway
 from .observability import TraceRecorder
@@ -26,17 +27,37 @@ from .tools.cases import build_case_registry
 
 
 class GuardedGateway:
-    """Bridge a worker's synchronous gateway to process-wide async admission."""
+    """Synchronous model boundary used only after async runtime admission."""
 
-    def __init__(self, runtime, loop, tenant_id):
-        self.runtime, self.loop, self.tenant_id = runtime, loop, tenant_id
+    def __init__(self, runtime, cancelled, deadline_at):
+        self.runtime, self.cancelled, self.deadline_at = runtime, cancelled, deadline_at
         self.mode, self.model = runtime.gateway.mode, runtime.gateway.model
         self.error = None
+        self.response = None
 
     def complete(self, messages, tools=None, *, max_tokens=1024):
+        if self.cancelled.is_set():
+            raise InvestigationInterrupted("cancelled")
+        if datetime.now(timezone.utc) >= self.deadline_at:
+            raise InvestigationInterrupted("budget_exhausted:deadline")
+        breaker = self.runtime.breakers.get("model")
         try:
-            return asyncio.run_coroutine_threadsafe(
-                self.runtime.model_call(self.tenant_id, messages, tools, max_tokens), self.loop).result()
+            if not breaker.allow():
+                raise ModelBackendError("Model circuit is open", kind="circuit_open", retryable=True,
+                                        retry_after_s=breaker.cooldown_s)
+            try:
+                self.response = self.runtime.gateway.complete(messages, tools, max_tokens=max_tokens)
+            except ModelBackendError as exc:
+                if exc.retryable:
+                    breaker.record_failure()
+                else:
+                    breaker.record_success()
+                raise
+            except Exception:
+                breaker.record_failure()
+                raise ModelBackendError("Unexpected model backend failure", kind="upstream", retryable=True) from None
+            breaker.record_success()
+            return self.response
         except ModelBackendError as exc:
             self.error = exc
             raise
@@ -60,54 +81,71 @@ class InvestigationRuntime:
         self.limiter = RateLimiter(user_qps=settings.user_qps, tenant_concurrency=settings.tenant_concurrency,
             tenant_token_per_min=settings.tenant_token_per_min, tenant_cost_per_day_usd=settings.tenant_cost_per_day_usd)
         self.breakers = BreakerRegistry()
-        # Waiting orchestrators occupy the default executor. Model work must
-        # have its own bounded pool or those waiters can starve their own calls.
+        # Only a gate-admitted step enters this pool. There is no whole-run
+        # submission or hidden default-executor queue before global admission.
         self._model_workers = ThreadPoolExecutor(max_workers=settings.upstream_concurrency,
                                                 thread_name_prefix="v2-model")
         self.records: dict[str, InvestigationRecord] = {}
         self.approval_owners: dict[str, str] = {}
 
-    async def model_call(self, tenant_id, messages, tools, max_tokens):
+    async def _advance(self, record, state, gateway, cancelled):
+        orchestrator, tenant_id = record.orchestrator, record.tenant_id
         acquired = False
-        breaker = self.breakers.get("model")
         try:
+            exhausted = state.budget.exhausted(datetime.now(timezone.utc))
+            if exhausted:
+                return orchestrator.stop(state, "budget_exhausted:" + ",".join(exhausted))
+            session = orchestrator.sessions[state.session_id]
+            messages = session.messages
+            max_tokens = min(4096, state.budget.max_tokens - state.budget.tokens_used)
             estimate = sum(approx_tokens(message.text_for_prompt()) for message in messages) + max_tokens
             self.limiter.check_tokens(tenant_id, estimate)
-            # Check cost for every call, including later steps in one request.
-            tenant = self.limiter._tenant(tenant_id)
-            if self.settings.tenant_cost_per_day_usd > 0 and tenant.usd_today >= self.settings.tenant_cost_per_day_usd:
-                raise ModelBackendError("Daily tenant budget exhausted", kind="tenant_cost_exceeded")
-            await self.gate.acquire()
+            self.limiter.check_cost(tenant_id)
+            remaining = (state.budget.deadline_at - datetime.now(timezone.utc)).total_seconds()
+            if remaining <= 0:
+                return orchestrator.stop(state, "budget_exhausted:deadline")
+            await self.gate.acquire(timeout_s=min(self.settings.queue_timeout_s, remaining))
             acquired = True
-            # A queue wait may span a breaker transition or new usage.
+            # Every admission decision is rechecked after waiting, including
+            # costs settled by the prior holder before it transfers this slot.
+            if datetime.now(timezone.utc) >= state.budget.deadline_at:
+                return orchestrator.stop(state, "budget_exhausted:deadline")
             self.limiter.check_tokens(tenant_id, estimate)
-            if not breaker.allow():
-                raise ModelBackendError("Model circuit is open", kind="circuit_open", retryable=True,
-                                        retry_after_s=breaker.cooldown_s)
+            self.limiter.check_cost(tenant_id)
+            gateway.response = None
+            worker = asyncio.get_running_loop().run_in_executor(self._model_workers, orchestrator.advance, state)
             try:
-                response = await asyncio.get_running_loop().run_in_executor(self._model_workers,
-                    partial(self.gateway.complete, messages, tools, max_tokens=max_tokens))
-            except ModelBackendError as exc:
-                if exc.retryable:
-                    breaker.record_failure()
-                else:
-                    breaker.record_success()
+                return await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                cancelled.set()
+                # Only the current step may finish. The orchestrator checks
+                # this Event after accounting and before each next tool.
+                while not worker.done():
+                    try:
+                        await asyncio.shield(worker)
+                    except asyncio.CancelledError:
+                        continue
+                worker.result()
                 raise
-            except Exception:
-                breaker.record_failure()
-                raise ModelBackendError("Unexpected model backend failure", kind="upstream", retryable=True) from None
-            breaker.record_success()
-            usage = response.usage
-            usd = 0.0 if self.model_mode == "replay" else (
-                usage.tokens_in * self.settings.price_input_per_mtok + usage.tokens_out * self.settings.price_output_per_mtok) / 1e6
-            self.limiter.record_usage(tenant_id, usage.total, usd)
-            return response
+            finally:
+                # Settle usage while still holding admission, even on cancel.
+                if gateway.response is not None:
+                    usage = gateway.response.usage
+                    usd = 0.0 if self.model_mode == "replay" else (
+                        usage.tokens_in * self.settings.price_input_per_mtok + usage.tokens_out * self.settings.price_output_per_mtok) / 1e6
+                    self.limiter.record_usage(tenant_id, usage.total, usd)
+                    gateway.response = None
+                record.error = None if cancelled.is_set() else gateway.error
         except GateRejected as exc:
+            if datetime.now(timezone.utc) >= state.budget.deadline_at:
+                return orchestrator.stop(state, "budget_exhausted:deadline")
             kind = "queue_full" if exc.reason.startswith("queue full") else "queue_timeout"
-            raise ModelBackendError("Model admission rejected", kind=kind, retryable=True, retry_after_s=1) from None
+            record.error = ModelBackendError("Model admission rejected", kind=kind, retryable=True, retry_after_s=1)
+            return orchestrator.stop(state, "model_backend:" + kind)
         except LimitExceeded as exc:
-            raise ModelBackendError("Tenant usage limit exceeded", kind=exc.kind,
-                retryable=exc.retry_after_s is not None, retry_after_s=exc.retry_after_s) from None
+            record.error = ModelBackendError("Tenant usage limit exceeded", kind=exc.kind,
+                retryable=exc.retry_after_s is not None, retry_after_s=exc.retry_after_s)
+            return orchestrator.stop(state, "model_backend:" + exc.kind)
         finally:
             if acquired:
                 await self.gate.release()
@@ -117,39 +155,27 @@ class InvestigationRuntime:
         world = load_case(case_id)
         self.limiter.check_request(tenant_id, user_id)
         try:
-            gateway = GuardedGateway(self, asyncio.get_running_loop(), tenant_id)
-            recorder = TraceRecorder(secrets=[self.settings.llm_api_key] if self.settings.llm_api_key else [])
-            orchestrator = InvestigationOrchestrator(gateway, build_case_registry(world), event_sink=recorder.record)
-            for action in world.actions:
-                orchestrator.approval_service.register_simulated(action["action_id"], SimulatedActionHandler({"ok": True}))
+            cancelled = Event()
             budget = Budget(self.settings.max_steps if max_steps is None else max_steps, max_tokens,
                             datetime.now(timezone.utc) + timedelta(seconds=deadline_s))
+            gateway = GuardedGateway(self, cancelled, budget.deadline_at)
+            recorder = TraceRecorder(secrets=[self.settings.llm_api_key] if self.settings.llm_api_key else [])
+            orchestrator = InvestigationOrchestrator(gateway, build_case_registry(world), event_sink=recorder.record,
+                                                     cancelled=cancelled.is_set)
+            for action in world.actions:
+                orchestrator.approval_service.register_simulated(action["action_id"], SimulatedActionHandler({"ok": True}))
             state = orchestrator.start(question if question is not None else f"Diagnose {case_id}.", case_id=case_id, budget=budget)
             record = InvestigationRecord(tenant_id, orchestrator, recorder, "trace-" + uuid4().hex)
             self.records[state.session_id] = record
 
-            def run():
-                current = state
-                while current.phase not in {InvestigationPhase.COMPLETED, InvestigationPhase.STOPPED, InvestigationPhase.AWAITING_APPROVAL}:
-                    current = orchestrator.advance(current)
-
-            # Cancellation must not release tenant admission while a synchronous
-            # model call is still running. The gateway has its own IO timeout.
-            worker = asyncio.create_task(asyncio.to_thread(run))
             try:
-                await asyncio.shield(worker)
+                while state.phase not in {InvestigationPhase.COMPLETED, InvestigationPhase.STOPPED, InvestigationPhase.AWAITING_APPROVAL}:
+                    state = await self._advance(record, state, gateway, cancelled)
             except asyncio.CancelledError:
-                # Disconnect and shutdown can issue repeated cancellation.
-                # Keep the worker shielded until its model admission is freed.
-                while not worker.done():
-                    try:
-                        await asyncio.shield(worker)
-                    except asyncio.CancelledError:
-                        continue
-                worker.result()
+                cancelled.set()
+                if state.session_id in orchestrator.sessions:
+                    orchestrator.stop(state, "cancelled")
                 raise
-            finally:
-                record.error = gateway.error
             return self.get_investigation(state.session_id, tenant_id)
         finally:
             self.limiter.release_request(tenant_id)

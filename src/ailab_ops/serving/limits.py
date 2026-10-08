@@ -157,14 +157,8 @@ class RateLimiter:
         Order matters: the cheapest and most decisive check runs first, so a
         request that cannot possibly succeed is rejected in microseconds.
         """
+        self.check_cost(tenant_id)
         st = self._tenant(tenant_id)
-
-        if self.tenant_cost_per_day_usd > 0 and st.usd_today >= self.tenant_cost_per_day_usd:
-            self._reject(
-                "tenant_cost_exceeded",
-                f"tenant {tenant_id} has spent ${st.usd_today:.4f} of its "
-                f"${self.tenant_cost_per_day_usd:.2f} daily budget; this does not clear on retry",
-            )
 
         st.in_flight += 1
         if st.in_flight > self.tenant_concurrency:
@@ -198,6 +192,14 @@ class RateLimiter:
                 f"minute (limit {self.tenant_token_per_min})",
                 retry_after_s=15.0,
             )
+
+    def check_cost(self, tenant_id: str) -> None:
+        """Check current settled daily usage without taking request admission."""
+        st = self._tenant(tenant_id)
+        if self.tenant_cost_per_day_usd > 0 and st.usd_today >= self.tenant_cost_per_day_usd:
+            self._reject("tenant_cost_exceeded",
+                f"tenant {tenant_id} has spent ${st.usd_today:.4f} of its "
+                f"${self.tenant_cost_per_day_usd:.2f} daily budget; this does not clear on retry")
 
     def check_tokens(self, tenant_id: str, estimated_tokens: int) -> None:
         st = self._tenant(tenant_id)

@@ -158,6 +158,16 @@ class UpstreamGate:
         limit = timeout_s if timeout_s is not None else self.queue_timeout_s
         try:
             await asyncio.wait_for(fut, timeout=limit)
+        except asyncio.CancelledError:
+            async with self._lock:
+                self._heap = [w for w in self._heap if w.future is not fut]
+                heapq.heapify(self._heap)
+                # release() may have transferred the slot just before this
+                # task observed cancellation. Return that slot exactly once.
+                transferred = fut.done() and not fut.cancelled() and fut.exception() is None
+            if transferred:
+                await self.release()
+            raise
         except asyncio.TimeoutError:
             async with self._lock:
                 self._heap = [w for w in self._heap if w.future is not fut]

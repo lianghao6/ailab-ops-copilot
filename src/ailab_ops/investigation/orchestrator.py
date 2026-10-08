@@ -32,6 +32,14 @@ class InvestigationSessionError(ValueError):
     """State does not belong to a live session of this orchestrator."""
 
 
+class InvestigationInterrupted(RuntimeError):
+    """Control-plane stop before model execution, not an upstream failure."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
 @dataclass
 class InvestigationSession:
     state: InvestigationState
@@ -50,7 +58,8 @@ class InvestigationOrchestrator:
                  persist: Callable[[InvestigationState], None] | None = None,
                  now: Callable[[], datetime] | None = None,
                  approval_store: ApprovalStore | None = None,
-                 event_sink: Callable[[TraceEvent], None] | None = None):
+                 event_sink: Callable[[TraceEvent], None] | None = None,
+                 cancelled: Callable[[], bool] | None = None):
         self.gateway = gateway
         self.registry = registry
         # The legacy injection is an empty, single-use test seam, not historical
@@ -61,6 +70,7 @@ class InvestigationOrchestrator:
         self.evidence_store = EvidenceStore()
         self._persist = persist
         self._now = now or (lambda: datetime.now(timezone.utc))
+        self._cancelled = cancelled or (lambda: False)
         self.sessions: dict[str, InvestigationSession] = {}
         # Latest immutable-by-copy state snapshots. No terminal chat transcripts
         # or events are retained here; durable storage can use the callback.
@@ -119,10 +129,12 @@ class InvestigationOrchestrator:
                 [self.registry.get(name).spec() for name in self.registry.names
                  if self.registry.get(name).kind == "read"],
                 max_tokens=min(4096, state.budget.max_tokens - state.budget.tokens_used))
+        except InvestigationInterrupted as exc:
+            return self._stop(session, exc.reason)
         except ModelBackendError as exc:
             self._emit(session, "error", "model_failed", model=self.gateway.model,
                        error=exc.kind, payload={"exception_type": type(exc).__name__})
-            return self._stop(session, f"model_backend:{exc.kind}")
+            return self._stop(session, "cancelled" if self._cancelled() else f"model_backend:{exc.kind}")
         state.budget.tokens_used += response.usage.total
         self._emit(session, "model", "received", model=response.model or self.gateway.model,
             usage={"tokens_in": response.usage.tokens_in, "tokens_out": response.usage.tokens_out},
@@ -155,6 +167,17 @@ class InvestigationOrchestrator:
                                InvestigationPhase.AWAITING_APPROVAL}:
             self._stop_if_exhausted(session)
         return state
+
+    def stop(self, state: InvestigationState, reason: str) -> InvestigationState:
+        """Stop an idle live session at a runtime admission/cancellation boundary.
+
+        Callers must not race this operation against an in-flight advance().
+        The worker's cancellation callback handles that case cooperatively.
+        """
+        session = self.sessions.get(state.session_id)
+        if session is None or state.to_dict() != session.state.to_dict():
+            raise InvestigationSessionError("Unknown, released or stale investigation session")
+        return self._stop(session, reason)
 
     def get_evidence(self, session_id: str, evidence_id: str) -> Evidence | None:
         """Read an isolated observation from an active or archived session.
@@ -274,6 +297,9 @@ class InvestigationOrchestrator:
         return session.state
 
     def _stop_if_exhausted(self, session: InvestigationSession, *, include_steps: bool = True) -> bool:
+        if self._cancelled():
+            self._stop(session, "cancelled")
+            return True
         limits = session.state.budget.exhausted(self._now())
         if not include_steps:
             limits = [limit for limit in limits if limit != "steps"]
