@@ -38,6 +38,13 @@ where = ["src"]
 [tool.setuptools.package-data]
 ailab_ops = ["datagen/*.yaml", "serving/static/*.html"]
 
+# Independent source assets are included in distributions without copying them
+# into the Python package. Non-editable deployments supply their data/v2 root.
+[tool.setuptools.data-files]
+"ailab_ops/data/v2/cases" = ["data/v2/cases/*.json"]
+"ailab_ops/data/v2/knowledge/runbooks" = ["data/v2/knowledge/runbooks/*.md"]
+"ailab_ops/data/v2/evals" = ["data/v2/evals/*.jsonl"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 filterwarnings = ["ignore::DeprecationWarning"]

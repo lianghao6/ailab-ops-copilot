@@ -1,0 +1,51 @@
+{
+  "case_id": "case-collective-timeout",
+  "title": "Training workers stopped progressing during an all-reduce",
+  "jobs": [{
+    "job_id": "job-v2-202", "name": "vision-adapter-train", "kind": "training",
+    "status": "FAILED", "exit_code": 1, "cluster": "lab-east", "queue": "teaching",
+    "submitted_at": "2026-09-29T01:55:00Z", "started_at": "2026-09-29T02:00:00Z",
+    "finished_at": "2026-09-29T02:14:25Z", "world_size": 4,
+    "node_ids": ["gpu-c", "gpu-d"], "workdir": "/workspace/vision-adapter",
+    "config": {"collective_timeout_s": 600, "precision": "bf16", "batch_size_per_rank": 4}
+  }],
+  "nodes": [
+    {"node_id": "gpu-c", "gpu_model": "A100", "gpu_count": 2, "ranks": [0, 1], "rdma_interface": "mlx5_0"},
+    {"node_id": "gpu-d", "gpu_model": "A100", "gpu_count": 2, "ranks": [2, 3], "rdma_interface": "mlx5_0"}
+  ],
+  "logs": [
+    {"job_id": "job-v2-202", "ts": "2026-09-29T02:00:00Z", "rank": 0, "node_id": "gpu-c", "level": "INFO", "source": "trainer", "message": "Distributed workers initialized, world_size=4, transport=NET/IB"},
+    {"job_id": "job-v2-202", "ts": "2026-09-29T02:04:00Z", "rank": 0, "node_id": "gpu-c", "level": "INFO", "source": "trainer", "message": "step=141 loss=1.08; all workers completed previous reduction."},
+    {"job_id": "job-v2-202", "ts": "2026-09-29T02:04:22Z", "rank": 2, "node_id": "gpu-d", "level": "WARNING", "source": "node-agent", "message": "RDMA port mlx5_0/1 state changed ACTIVE -> DOWN"},
+    {"job_id": "job-v2-202", "ts": "2026-09-29T02:04:22Z", "rank": 2, "node_id": "gpu-d", "level": "ERROR", "source": "stderr", "message": "NCCL WARN NET/IB: Got completion from peer with status=12 (IBV_WC_RETRY_EXC_ERR), vendor err 129; communicator async error set."},
+    {"job_id": "job-v2-202", "ts": "2026-09-29T02:04:23Z", "rank": 0, "node_id": "gpu-c", "level": "WARNING", "source": "stderr", "message": "NCCL WARN NET/IB: retrying connection to peer after completion error."},
+    {"job_id": "job-v2-202", "ts": "2026-09-29T02:14:22Z", "rank": 0, "node_id": "gpu-c", "level": "ERROR", "source": "stderr", "message": "Watchdog caught collective operation timeout: WorkNCCL(SeqNum=142, OpType=ALLREDUCE, Timeout(ms)=600000) ran for 600010 milliseconds before timing out."},
+    {"job_id": "job-v2-202", "ts": "2026-09-29T02:14:22Z", "rank": 1, "node_id": "gpu-c", "level": "ERROR", "source": "stderr", "message": "WorkNCCL SeqNum=142 ALLREDUCE timed out after 600011ms; last completed SeqNum=141."},
+    {"job_id": "job-v2-202", "ts": "2026-09-29T02:14:23Z", "rank": 2, "node_id": "gpu-d", "level": "ERROR", "source": "stderr", "message": "WorkNCCL SeqNum=142 ALLREDUCE timed out after 600012ms; aborting communicator."},
+    {"job_id": "job-v2-202", "ts": "2026-09-29T02:14:23Z", "rank": 3, "node_id": "gpu-d", "level": "ERROR", "source": "stderr", "message": "WorkNCCL SeqNum=142 ALLREDUCE timed out after 600013ms; aborting communicator."},
+    {"job_id": "job-v2-202", "ts": "2026-09-29T02:14:25Z", "rank": 0, "node_id": "gpu-c", "level": "ERROR", "source": "launcher", "message": "Worker group terminated following process-group abort, exit code=1."}
+  ],
+  "metrics": [
+    {"job_id": "job-v2-202", "metric": "rdma_port_link_down_events_total", "node_id": "gpu-d", "unit": "count", "ts_start": "2026-09-29T02:04:00Z", "step_s": 30, "values": [0, 1, 1, 1]},
+    {"job_id": "job-v2-202", "metric": "rdma_port_retry_errors_total", "node_id": "gpu-d", "unit": "count", "ts_start": "2026-09-29T02:04:00Z", "step_s": 30, "values": [0, 128, 256, 256]},
+    {"job_id": "job-v2-202", "metric": "gpu_memory_used_gib", "rank": 2, "unit": "GiB", "ts_start": "2026-09-29T02:04:00Z", "step_s": 30, "values": [28.4, 28.4, 28.4, 28.4]},
+    {"job_id": "job-v2-202", "metric": "training_steps_total", "rank": 0, "unit": "count", "ts_start": "2026-09-29T02:04:00Z", "step_s": 30, "values": [141, 141, 141, 141]}
+  ],
+  "incidents": [{
+    "incident_id": "incident-v2-202", "job_id": "job-v2-202", "severity": "SEV3", "status": "OPEN",
+    "opened_at": "2026-09-29T02:14:30Z", "title": "No step progress reported",
+    "timeline": [
+      {"ts": "2026-09-29T02:14:30Z", "actor": "alerts", "event": "Job failure alert received."},
+      {"ts": "2026-09-29T02:15:00Z", "actor": "oncall", "event": "Per-rank logs and node interface counters attached for review."}
+    ]
+  }],
+  "actions": [
+    {"action_id": "annotate_incident", "description": "Preview an investigation note in the local simulator", "simulated": true},
+    {"action_id": "request_node_check", "description": "Preview a node-interface inspection request", "simulated": true}
+  ],
+  "telemetry": {
+    "logs": {"complete": true, "available_ranks": [0, 1, 2, 3], "clock": "UTC, synchronized within 100ms"},
+    "metrics": {"available": true, "sample_interval_s": 30, "gpu_capacity_gib": 40},
+    "note": "Curated observation excerpts; switch counters and physical link inspection are unavailable."
+  }
+}

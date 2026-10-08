@@ -1,0 +1,38 @@
+{
+  "case_id": "case-insufficient-evidence",
+  "title": "An interrupted run with only launcher tail retained",
+  "jobs": [{
+    "job_id": "job-v2-303", "name": "ranking-adapter-train", "kind": "training",
+    "status": "FAILED", "exit_code": 143, "cluster": "lab-west", "queue": "teaching",
+    "submitted_at": "2026-09-30T02:50:00Z", "started_at": "2026-09-30T03:00:00Z",
+    "finished_at": "2026-09-30T03:20:02Z", "world_size": 4,
+    "node_ids": ["gpu-e", "gpu-f"], "workdir": "/workspace/ranking-adapter",
+    "config": {"collective_timeout_s": 600, "precision": "bf16", "batch_size_per_rank": 8}
+  }],
+  "nodes": [
+    {"node_id": "gpu-e", "gpu_model": "A100", "gpu_count": 2, "ranks": [0, 1]},
+    {"node_id": "gpu-f", "gpu_model": "A100", "gpu_count": 2, "ranks": [2, 3]}
+  ],
+  "logs": [
+    {"job_id": "job-v2-303", "ts": "2026-09-30T03:20:00Z", "rank": 0, "node_id": "gpu-e", "level": "WARNING", "source": "launcher", "message": "Received SIGTERM; forwarding signal to remaining workers."},
+    {"job_id": "job-v2-303", "ts": "2026-09-30T03:20:02Z", "rank": 0, "node_id": "gpu-e", "level": "ERROR", "source": "launcher", "message": "Worker group stopped; launcher exit code=143. Signal sender not recorded."}
+  ],
+  "metrics": [],
+  "incidents": [{
+    "incident_id": "incident-v2-303", "job_id": "job-v2-303", "severity": "SEV3", "status": "OPEN",
+    "opened_at": "2026-09-30T03:20:10Z", "title": "Training interrupted",
+    "timeline": [
+      {"ts": "2026-09-30T03:20:10Z", "actor": "alerts", "event": "Job failure alert received."},
+      {"ts": "2026-09-30T03:21:00Z", "actor": "oncall", "event": "Only launcher tail available; worker stderr rotated before collection. Scheduler event export is pending."}
+    ]
+  }],
+  "actions": [
+    {"action_id": "request_log_export", "description": "Preview recovery request for worker stderr and scheduler events", "simulated": true},
+    {"action_id": "annotate_incident", "description": "Preview an investigation note in the local simulator", "simulated": true}
+  ],
+  "telemetry": {
+    "logs": {"complete": false, "available_ranks": [0], "available_sources": ["launcher"], "retained_from": "2026-09-30T03:20:00Z", "missing": ["worker stderr for ranks 0-3", "launcher history before retained tail", "scheduler termination events"]},
+    "metrics": {"available": false, "note": "Exporter was not enabled for this run."},
+    "note": "No signal-sender audit, container termination reason, or node health record was retained."
+  }
+}

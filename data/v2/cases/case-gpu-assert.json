@@ -1,0 +1,49 @@
+{
+  "case_id": "case-gpu-assert",
+  "title": "Four-worker training stopped after a local runtime error",
+  "jobs": [{
+    "job_id": "job-v2-101", "name": "text-adapter-train", "kind": "training",
+    "status": "FAILED", "exit_code": 1, "cluster": "lab-west", "queue": "teaching",
+    "submitted_at": "2026-09-28T00:58:00Z", "started_at": "2026-09-28T01:00:00Z",
+    "finished_at": "2026-09-28T01:11:03Z", "world_size": 4,
+    "node_ids": ["gpu-a", "gpu-b"], "workdir": "/workspace/text-adapter",
+    "config": {"collective_timeout_s": 600, "precision": "bf16", "batch_size_per_rank": 8}
+  }],
+  "nodes": [
+    {"node_id": "gpu-a", "gpu_model": "A100", "gpu_count": 2, "ranks": [0, 1]},
+    {"node_id": "gpu-b", "gpu_model": "A100", "gpu_count": 2, "ranks": [2, 3]}
+  ],
+  "logs": [
+    {"job_id": "job-v2-101", "ts": "2026-09-28T01:00:00Z", "rank": 0, "node_id": "gpu-a", "level": "INFO", "source": "trainer", "message": "Distributed workers initialized, world_size=4"},
+    {"job_id": "job-v2-101", "ts": "2026-09-28T01:00:30Z", "rank": 0, "node_id": "gpu-a", "level": "INFO", "source": "trainer", "message": "step=18 loss=2.13 allocated_gpu_memory_gib=31.2"},
+    {"job_id": "job-v2-101", "ts": "2026-09-28T01:00:31Z", "rank": 2, "node_id": "gpu-b", "level": "WARNING", "source": "dataloader", "message": "Batch prefetch waited 0.4s; continuing"},
+    {"job_id": "job-v2-101", "ts": "2026-09-28T01:01:00Z", "rank": 2, "node_id": "gpu-b", "level": "ERROR", "source": "stderr", "message": "Indexing.cu:1289: indexSelectLargeIndex: Assertion `srcIndex < srcSelectDimSize` failed."},
+    {"job_id": "job-v2-101", "ts": "2026-09-28T01:01:00Z", "rank": 2, "node_id": "gpu-b", "level": "ERROR", "source": "stderr", "message": "RuntimeError: CUDA error: device-side assert triggered while executing embedding lookup. CUDA kernel errors might be asynchronously reported at some other API call."},
+    {"job_id": "job-v2-101", "ts": "2026-09-28T01:11:00Z", "rank": 0, "node_id": "gpu-a", "level": "ERROR", "source": "stderr", "message": "Watchdog caught collective operation timeout: WorkNCCL(SeqNum=19, OpType=ALLREDUCE, Timeout(ms)=600000) ran for 600012 milliseconds before timing out."},
+    {"job_id": "job-v2-101", "ts": "2026-09-28T01:11:01Z", "rank": 1, "node_id": "gpu-a", "level": "ERROR", "source": "stderr", "message": "WorkNCCL SeqNum=19 ALLREDUCE timed out after 600013ms; aborting process group."},
+    {"job_id": "job-v2-101", "ts": "2026-09-28T01:11:01Z", "rank": 3, "node_id": "gpu-b", "level": "ERROR", "source": "stderr", "message": "WorkNCCL SeqNum=19 ALLREDUCE timed out after 600014ms; aborting process group."},
+    {"job_id": "job-v2-101", "ts": "2026-09-28T01:11:03Z", "rank": 0, "node_id": "gpu-a", "level": "ERROR", "source": "launcher", "message": "Worker group terminated; first observed worker exit rank=2 code=1, peer workers signaled."}
+  ],
+  "metrics": [
+    {"job_id": "job-v2-101", "metric": "gpu_util_pct", "rank": 2, "unit": "%", "ts_start": "2026-09-28T01:00:30Z", "step_s": 30, "values": [82, 0, 0]},
+    {"job_id": "job-v2-101", "metric": "gpu_memory_used_gib", "rank": 2, "unit": "GiB", "ts_start": "2026-09-28T01:00:30Z", "step_s": 30, "values": [31.2, 31.3, 31.3]},
+    {"job_id": "job-v2-101", "metric": "host_memory_used_pct", "node_id": "gpu-b", "unit": "%", "ts_start": "2026-09-28T01:00:30Z", "step_s": 30, "values": [43, 44, 43]}
+  ],
+  "incidents": [{
+    "incident_id": "incident-v2-101", "job_id": "job-v2-101", "severity": "SEV3", "status": "OPEN",
+    "opened_at": "2026-09-28T01:11:10Z", "title": "Worker group stopped making progress",
+    "timeline": [
+      {"ts": "2026-09-28T01:11:10Z", "actor": "alerts", "event": "Job failure alert received."},
+      {"ts": "2026-09-28T01:12:00Z", "actor": "oncall", "event": "Per-rank stderr and memory samples retained for investigation."}
+    ]
+  }],
+  "actions": [
+    {"action_id": "annotate_incident", "description": "Preview an investigation note in the local simulator", "simulated": true},
+    {"action_id": "request_log_export", "description": "Preview an export request for all worker logs", "simulated": true}
+  ],
+  "telemetry": {
+    "logs": {"complete": true, "available_ranks": [0, 1, 2, 3], "clock": "UTC, synchronized within 100ms"},
+    "metrics": {"available": true, "sample_interval_s": 30, "gpu_capacity_gib": 40},
+    "note": "Curated observation excerpts; no sample payload or kernel synchronization trace was captured."
+  }
+}
