@@ -124,6 +124,8 @@ class Element {
   set outerHTML(_) { throw Error("Unsafe HTML sink"); }
   append(...children) { this.children.push(...children); }
   replaceChildren(...children) { this.text = ""; this.children = children; }
+  insertBefore(child, reference) { this.children = this.children.filter(e => e !== child); const index = this.children.indexOf(reference); this.children.splice(index < 0 ? this.children.length : index, 0, child); }
+  removeChild(child) { this.children = this.children.filter(e => e !== child); }
   setAttribute(key, value) { this.attrs[key] = value; }
   removeAttribute(key) { delete this.attrs[key]; }
   addEventListener(key, callback) { this.handlers[key] = callback; }

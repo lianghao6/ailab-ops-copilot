@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ailab_ops.runtime import build_runtime
+from ailab_ops.observability import TraceEvent
 from ailab_ops.serving.app import create_app
 from test_v2_api import create, proposal
 from test_v2_runtime import replay_settings
@@ -22,11 +23,13 @@ const vm = require("vm");
 const input = JSON.parse(fs.readFileSync(0, "utf8"));
 class Element {
   constructor(tag) { this.tag = tag; this.children = []; this.attrs = {}; this.dataset = {}; this.value = ""; this.text = ""; this.handlers = {}; this.disabled = false; this.checked = false; }
-  set textContent(value) { this.text = String(value); this.children = []; }
+  set textContent(value) { this.text = String(value); this.children = []; this.textWrites = (this.textWrites || 0) + 1; }
   get textContent() { return this.text + this.children.map(x => x.textContent).join(""); }
   set innerHTML(_) { throw Error("unsafe HTML sink"); }
   append(...children) { this.children.push(...children); }
   replaceChildren(...children) { this.text = ""; this.children = children; }
+  insertBefore(child, reference) { this.children = this.children.filter(e => e !== child); const index = this.children.indexOf(reference); this.children.splice(index < 0 ? this.children.length : index, 0, child); }
+  removeChild(child) { this.children = this.children.filter(e => e !== child); }
   setAttribute(key, value) { this.attrs[key] = value; }
   removeAttribute(key) { delete this.attrs[key]; }
   addEventListener(key, callback) { this.handlers[key] = callback; }
@@ -169,6 +172,51 @@ const watchdog = require("timers").setTimeout(() => { process.stderr.write("Flow
     elements["tenant-id"].value = "other"; ws.confirmTenant();
     assert.strictEqual(timers.size, 0, "tenant switch must cancel polling");
     assert.strictEqual(ws.state.detail, null);
+  } else if (["poll_reading", "poll_controls", "poll_superseded"].includes(input.scenario)) {
+    transport = async path => reply(path.includes("timeline") ? input.pending.timeline : input.pending);
+    await ws.loadSession(input.pending.session_id);
+    const panels = ["evidence-list", "hypothesis-list", "report-content", "timeline-list", "approval-audit"];
+    const retained = panels.map(id => elements[id].children[0]);
+    const disclosures = panels.map(id => find(elements[id], e => e.tag === "details")).filter(Boolean);
+    for (const disclosure of disclosures) disclosure.open = true;
+    const button = action("approve");
+    const statusWrites = elements["workspace-status"].textWrites;
+    let resolve;
+    transport = path => path.includes("timeline") ? Promise.resolve(reply(input.pending.timeline)) : new Promise(done => { resolve = done; });
+    const poll = timers.values().next().value; timers.clear(); const reading = poll(); await tick();
+    if (input.scenario === "poll_controls") {
+      assert.strictEqual(button.disabled, false, "background GET must not disable the available approval button");
+      assert.strictEqual(ws.state.busy, false, "background read must not block foreground controls");
+    } else if (input.scenario === "poll_superseded") {
+      elements["action-actor"].value = "reviewer";
+      find(elements["approval-list"], e => e.dataset.confirm === "approve").checked = true;
+      transport = async (path, options) => reply(options.method === "POST" ? input.approved.approvals[0] : path.includes("timeline") ? input.approved.timeline : input.approved);
+      await button.handlers.click();
+      assert.strictEqual(ws.state.detail.approvals[0].status, "approved", "foreground decision must supersede a background read");
+    }
+    resolve(reply(JSON.parse(JSON.stringify(input.pending)))); await reading;
+    if (input.scenario === "poll_superseded") assert.strictEqual(ws.state.detail.approvals[0].status, "approved", "late background data must not overwrite a confirmed decision");
+    else {
+      panels.forEach((id, index) => assert.strictEqual(elements[id].children[0], retained[index], "poll preserves reading nodes: " + id));
+      assert.strictEqual(elements["workspace-status"].textWrites, statusWrites, "unchanged background status must not re-announce live content");
+      for (const disclosure of disclosures) assert.strictEqual(disclosure.open, true);
+      const changed = JSON.parse(JSON.stringify(input.pending));
+      changed.timeline.events.push({...changed.timeline.events.find(e => e.kind === "approval"), event:"new-audit-event"});
+      changed.timeline.total_events += 1;
+      changed.evidence.push({...changed.evidence[0], evidence_id:"new-observation"});
+      transport = async path => reply(path.includes("timeline") ? changed.timeline : changed);
+      const next = timers.values().next().value; timers.clear(); await next();
+      panels.forEach((id, index) => assert.strictEqual(elements[id].children[0], retained[index], "new event preserves existing reading nodes: " + id));
+      assert(elements["timeline-list"].textContent.includes("new-audit-event"));
+      assert(elements["approval-audit"].textContent.includes("new-audit-event"));
+    }
+  } else if (input.scenario === "timeline_metadata") {
+    ws.render(input.pending);
+    const text = elements["timeline-list"].textContent;
+    for (const value of ["<tool-call>", "<model-call>", "input_tokens", "latency_ms", "42.5", "retry", "safe-error", input.detail.evidence_ids[0]]) assert(text.includes(value), "public timeline call metadata: " + value);
+    const citation = find(elements["timeline-list"], e => e.className === "citation");
+    assert(citation && citation.href === "#evidence-0", "event evidence must reach a displayed evidence anchor");
+    for (const secret of ["private-thought", "do-not-disclose"]) assert(!text.includes(secret), "UI must only receive redacted presentation data");
   } else if (input.scenario === "proposal") {
     await start(); setProposal(); calls.length=0;
     elements["proposal-arguments"].value = "[]";
@@ -343,6 +391,10 @@ def browser_payload():
         action = proposal(detail)
         approval = client.post(path + "/approvals", json={"proposal": action}).json()
         approval_path = "/v2/approvals/" + approval["request_id"]
+        client.app.state.rt.record(detail["session_id"]).recorder.record(TraceEvent(
+            detail["session_id"], "model", event="metadata-contract", tool="<tool-call>", model="<model-call>",
+            usage={"input_tokens": 123}, latency_ms=42.5, retry=2, error="safe-error",
+            evidence_ids=[detail["evidence_ids"][0]], payload={"api_key": "do-not-disclose", "reasoning_content": "private-thought"}))
         pending = client.get(path).json()
         client.post(approval_path + "/approve", json={"actor": "reviewer"})
         approved = client.get(path).json()
@@ -360,7 +412,7 @@ def browser_payload():
                 "script": str(Path(__file__).resolve().parents[1] / "src/ailab_ops/serving/static/v2/app.js")}
 
 
-@pytest.mark.parametrize("scenario", ["replay", "online", "errors", "duplicate_cancel_stale", "poll", "proposal", "decisions", "reject_expiry_identity", "mutation_refresh_error", "refresh_preserves_review", "stale_followup", "mutation_duplicate_abort", "nonretry_poll_error", "start_action_audit", "tenant_drafts", "expiry_in_place", "reload", "post_transport_exception"])
+@pytest.mark.parametrize("scenario", ["replay", "online", "errors", "duplicate_cancel_stale", "poll", "poll_reading", "poll_controls", "poll_superseded", "timeline_metadata", "proposal", "decisions", "reject_expiry_identity", "mutation_refresh_error", "refresh_preserves_review", "stale_followup", "mutation_duplicate_abort", "nonretry_poll_error", "start_action_audit", "tenant_drafts", "expiry_in_place", "reload", "post_transport_exception"])
 def test_browser_flow(browser_payload, scenario):
     node = shutil.which("node")
     if not node:

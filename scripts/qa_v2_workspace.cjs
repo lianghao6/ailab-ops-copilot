@@ -29,8 +29,12 @@ const findings = [];
       // Hold the real create request to capture the native browser waiting state.
       await page.setRequestInterception(true);
       let held=null;
+      let holdRead=false, heldRead=null;
       page.on("request", request=>{
         if(request.method()==="POST" && request.url()===base+"/v2/investigations") held=request;
+        else if(holdRead && request.method()==="GET" && /\/v2\/investigations\/[^/?]+\?/.test(request.url())) {
+          holdRead=false; heldRead=request;
+        }
         else request.continue();
       });
       await page.goto(base, {waitUntil:"networkidle0"});
@@ -121,6 +125,20 @@ const findings = [];
       await held.continue(); held=null;
       await page.waitForFunction(()=>window.AILabWorkspace.state.detail?.phase==="completed" && !window.AILabWorkspace.state.busy);
       await capture("completed");
+      const metadata = await page.evaluate(()=>{
+        const events=window.AILabWorkspace.state.detail.timeline.events;
+        const rows=[...document.querySelectorAll("#timeline-list > li")];
+        return events.map((event,index)=>({tool:event.tool,model:event.model,evidence:event.evidence_ids,
+          text:rows[index].textContent,links:[...rows[index].querySelectorAll(".citation")].map(e=>e.getAttribute("href"))}));
+      });
+      assert(metadata.some(e=>e.tool) && metadata.some(e=>e.model),"replay has real tool and model calls");
+      for(const event of metadata) {
+        if(event.tool) assert(event.text.includes(`工具 / ${event.tool}`));
+        if(event.model) assert(event.text.includes(`模型 / ${event.model}`));
+        for(const id of event.evidence) assert(event.text.includes(id) && event.links.length,"linked call evidence");
+        for(const field of ["usage","latency_ms","retry","error"]) assert(event.text.includes(field),`call metadata ${field}`);
+      }
+      findings.push({display,zoom,timelineMetadata:true,toolCalls:metadata.filter(e=>e.tool).length,modelCalls:metadata.filter(e=>e.model).length});
       await tabCycle("completed");
       const submit=async ()=>{
         await page.evaluate(()=>{
@@ -134,6 +152,40 @@ const findings = [];
       };
       await submit();
       await capture("pending");
+      // Cross the shipped 2500ms timer, not a manually invoked refresh. Hold a
+      // real background detail GET to inspect controls before and after it.
+      for(const selector of ["#timeline-list summary", "[data-action=approve]"]) {
+        await page.evaluate(()=>{
+          const panels=["evidence-list","report-content","timeline-list","approval-audit"];
+          window.__qaReading=panels.map(id=>document.getElementById(id).firstElementChild);
+          window.__qaDisclosures=[...document.querySelectorAll("#evidence-list details,#timeline-list details,#approval-audit details")];
+          window.__qaDisclosures.forEach(e=>{e.open=true;});
+          window.__qaPollRendered=false;
+          document.addEventListener("ailab:investigation",()=>{window.__qaPollRendered=true;},{once:true});
+        });
+        await page.focus(selector);
+        const requested=page.waitForRequest(request=>request.method()==="GET" && /\/v2\/investigations\/[^/?]+\?/.test(request.url()),{timeout:10000});
+        holdRead=true;
+        await requested;
+        assert(heldRead,"automatic detail GET held");
+        const check=()=>page.evaluate(selector=>({
+          focus:document.activeElement===document.querySelector(selector),
+          available:!document.querySelector("[data-action=approve]").disabled,
+          busy:window.AILabWorkspace.state.busy,
+          retained:["evidence-list","report-content","timeline-list","approval-audit"].every((id,index)=>document.getElementById(id).firstElementChild===window.__qaReading[index]),
+          open:window.__qaDisclosures.every(e=>e.isConnected && e.open),
+        }),selector);
+        const during=await check();
+        assert(during.focus && during.available && !during.busy && during.retained && during.open,"poll in flight does not interrupt reading/focus/approval");
+        await heldRead.continue(); heldRead=null;
+        await page.waitForFunction(()=>window.__qaPollRendered);
+        const after=await check();
+        assert(after.focus && after.available && !after.busy && after.retained && after.open,"poll completion retains reading/focus/approval");
+        findings.push({display,zoom,pollFocus:selector,timerMs:2500,during,after});
+      }
+      // Restore disclosure defaults so keyboard traversal uses the same state
+      // as the earlier QA baseline.
+      await page.evaluate(()=>window.__qaDisclosures.forEach(e=>{e.open=false;}));
       await tabCycle("pending");
       assert.strictEqual(await page.$("[data-action=execute]"),null);
       assert(await page.$eval("#approval-list details",e=>e.open));

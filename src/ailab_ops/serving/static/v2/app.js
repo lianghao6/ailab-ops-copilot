@@ -100,7 +100,7 @@
   function status(kind, message) {
     state.kind = kind;
     byId("workspace-status").dataset.state = kind;
-    byId("workspace-status").textContent = message;
+    if (byId("workspace-status").textContent !== message) byId("workspace-status").textContent = message;
     byId("investigation").setAttribute("aria-busy", String(kind === "loading"));
     updateControls();
   }
@@ -144,6 +144,38 @@
 
   function empty(container, message) { container.replaceChildren(node("p", message, "empty")); }
 
+  function unchanged(board, value) {
+    const snapshot = json([state.tenantId, state.sessionId, value]);
+    if (board.dataset.renderSnapshot === snapshot) return true;
+    board.dataset.renderSnapshot = snapshot;
+    return false;
+  }
+
+  // Retain each unchanged event, even when a poll adds events or the bounded
+  // server window drops older rows. Never detach the whole reading surface.
+  function renderEvents(board, events, context, createItem) {
+    const previous = new Map();
+    for (const item of board.children) {
+      const rows = previous.get(item.dataset.snapshot) || [];
+      rows.push(item);
+      previous.set(item.dataset.snapshot, rows);
+    }
+    const items = events.map((event, index) => {
+      const snapshot = json([state.tenantId, state.sessionId, typeof context === "function" ? context(event, index) : context, event]);
+      const item = previous.get(snapshot)?.shift() || createItem(event, index);
+      item.dataset.snapshot = snapshot;
+      return item;
+    });
+    const focused = document.activeElement;
+    const retainedFocus = focused && board.contains(focused);
+    items.forEach((item, index) => {
+      if (board.children[index] !== item) board.insertBefore(item, board.children[index] || null);
+    });
+    for (const item of Array.from(board.children)) if (!items.includes(item)) board.removeChild(item);
+    // Reordering a retained focused row can blur it in some browsers.
+    if (retainedFocus && focused.isConnected && document.activeElement !== focused) focused.focus({preventScroll:true});
+  }
+
   function citations(ids, available) {
     const group = node("span", null, "citation-list");
     for (const id of list(ids)) {
@@ -160,6 +192,8 @@
     return group;
   }
 
+  function citationContext(ids, refs) { return list(refs).map(id => [id, ids.indexOf(id)]); }
+
   function details(label, value) {
     const disclosure = node("details");
     disclosure.append(node("summary", label), node("pre", json(value)));
@@ -168,10 +202,10 @@
 
   function renderEvidence(evidence) {
     const board = byId("evidence-list");
-    board.replaceChildren();
+    if (unchanged(board, evidence)) return;
     byId("evidence-count").textContent = String(evidence.length);
     if (!evidence.length) return empty(board, "暂无证据。未完成的调查可能未能获取观察。");
-    evidence.forEach((item, index) => {
+    renderEvents(board, evidence, (_, index) => index, (item, index) => {
       const article = node("article", null, "evidence-card");
       article.id = `evidence-${index}`;
       article.tabIndex = -1;
@@ -185,15 +219,16 @@
       if (item.truncated) body.append(node("p", "来源片段已截断。", "field-note"));
       body.append(details("来源参数与元信息", { arguments: item.arguments, metadata: item.metadata }));
       article.append(mark, body);
-      board.append(article);
+      return article;
     });
   }
 
   function renderHypotheses(hypotheses, ids) {
     const board = byId("hypothesis-list");
-    board.replaceChildren();
+    const context = item => citationContext(ids, [...list(item.supporting_evidence_ids), ...list(item.contradicting_evidence_ids)]);
+    if (unchanged(board, [hypotheses, hypotheses.map(context)])) return;
     if (!hypotheses.length) return empty(board, "暂无假设。支持与反证会并列呈现。");
-    for (const item of hypotheses) {
+    renderEvents(board, hypotheses, context, item => {
       const article = node("article", null, "hypothesis");
       article.append(node("h4", item.title), node("p", `${item.hypothesis_id} · 置信度 ${percent(item.confidence)}`, "source-line"));
       for (const [label, refs] of [["支持", item.supporting_evidence_ids], ["反证", item.contradicting_evidence_ids]]) {
@@ -201,12 +236,13 @@
         line.append(citations(refs, ids));
         article.append(line);
       }
-      board.append(article);
-    }
+      return article;
+    });
   }
 
   function renderReport(report, ids) {
     const board = byId("report-content");
+    if (unchanged(board, [report, citationContext(ids, list(report?.claims).flatMap(claim => list(claim.evidence_ids)))])) return;
     board.replaceChildren();
     if (!report) return empty(board, "尚未形成报告。停止原因与已取得证据仍会保留。");
     board.append(node("p", `${report.root_cause} · 置信度 ${percent(report.confidence)}`, "report-finding"), node("p", report.summary, "report-summary"));
@@ -228,21 +264,31 @@
     }
   }
 
-  function renderTimeline(timeline) {
+  function renderTimeline(timeline, ids) {
     const board = byId("timeline-list");
-    board.replaceChildren();
     const events = list(timeline?.events);
     byId("timeline-summary").textContent = events.length
       ? `${timeline.trace_id || ""} · ${events.length} / ${timeline.total_events} 条事件${timeline.truncated ? " · 仅展示最近事件" : ""}`
       : "暂无事件。";
-    for (const event of events) {
+    renderEvents(board, events, event => citationContext(ids, event.evidence_ids), event => {
       const item = node("li");
       const time = node("time", event.timestamp || "时间未提供");
       if (event.timestamp) time.dateTime = event.timestamp;
       item.append(time, node("p", `${event.kind || ""} / ${event.event || ""}`));
+      if (event.tool) item.append(node("p", `工具 / ${event.tool}`, "source-line"));
+      if (event.model) item.append(node("p", `模型 / ${event.model}`, "source-line"));
+      if (list(event.evidence_ids).length) {
+        const references = node("p", "关联证据 / ");
+        references.append(citations(event.evidence_ids, ids));
+        item.append(references);
+      }
+      // Only public call metadata from the redacted presentation response;
+      // never merge a raw trace or private model reasoning into this view.
+      item.append(details("调用信息", {usage: event.usage, latency_ms: event.latency_ms,
+        retry: event.retry, error: event.error}));
       if (event.payload && Object.keys(event.payload).length) item.append(details("事件数据", event.payload));
-      board.append(item);
-    }
+      return item;
+    });
   }
 
   function renderApprovals(approvals, ids) {
@@ -345,14 +391,13 @@
 
   function renderAudit(timeline) {
     const board = byId("approval-audit");
-    board.replaceChildren();
     const events = list(timeline?.events).filter((event) => event.kind === "approval");
-    for (const event of events) {
+    renderEvents(board, events, null, event => {
       const item = node("li");
       item.append(node("time", event.timestamp || "时间未提供"), node("p", `${event.event} / ${event.payload?.actor || "未给出"} / ${event.approval_id || ""}`));
       item.append(details("审计数据", event.payload));
-      board.append(item);
-    }
+      return item;
+    });
     byId("audit-note").textContent = timeline?.truncated
       ? "服务端审计窗口已截断，当前显示最近事件；更早事件未包含在响应中。"
       : events.length ? `已展示服务端返回的 ${events.length} 条审批审计，按发生顺序排列。` : "暂无审批审计。";
@@ -377,29 +422,31 @@
       else item.removeAttribute("aria-current");
     }
     const plan = byId("plan-list");
-    plan.replaceChildren();
-    for (const step of list(detail?.plan)) plan.append(node("li", step));
-    if (!plan.children.length) plan.append(node("li", "暂无调查计划。", "empty"));
+    if (!unchanged(plan, detail?.plan)) {
+      plan.replaceChildren();
+      for (const step of list(detail?.plan)) plan.append(node("li", step));
+      if (!plan.children.length) plan.append(node("li", "暂无调查计划。", "empty"));
+    }
     const evidence = list(detail?.evidence);
     const ids = evidence.map((item) => item.evidence_id);
     renderEvidence(evidence);
     renderHypotheses(list(detail?.hypotheses), ids);
     renderReport(detail?.report, ids);
-    renderTimeline(detail?.timeline);
+    renderTimeline(detail?.timeline, ids);
     renderApprovals(list(detail?.approvals), ids);
     renderAudit(detail?.timeline);
     updateControls();
     document.dispatchEvent(new CustomEvent("ailab:investigation", { detail }));
   }
 
-  function begin(message, writing = false) {
+  function begin(message, writing = false, background = false) {
     if (activeController) activeController.abort();
     stopPolling();
     activeController = new AbortController();
     generation += 1;
-    state.busy = true;
+    state.busy = !background;
     state.writing = writing;
-    status("loading", message);
+    if (!background) status("loading", message);
     return { signal: activeController.signal, generation };
   }
 
@@ -414,7 +461,7 @@
     const owner = generation;
     pollTimer = setTimeout(async () => {
       pollTimer = null;
-      if (owner === generation && !state.busy) await refreshSession();
+      if (owner === generation && !state.busy) await refreshSession({background:true});
     }, 2500);
   }
 
@@ -482,9 +529,9 @@
         : `当前阶段 / ${detail.phase}。服务端状态将自动刷新。`);
   }
 
-  async function loadSession(sessionId) {
+  async function loadSession(sessionId, {background = false} = {}) {
     if (!confirmTenant() || !sessionId || state.writing) return;
-    const operation = begin("正在恢复调查与引用证据…");
+    const operation = begin("正在恢复调查与引用证据…", false, background);
     try {
       const detail = await readSession(sessionId, operation);
       if (operation.generation !== generation) return;
@@ -495,9 +542,9 @@
     } finally { finish(operation); }
   }
 
-  async function refreshSession() {
+  async function refreshSession({background = false} = {}) {
     if (!confirmTenant() || state.busy || !state.sessionId) return;
-    return loadSession(state.sessionId);
+    return loadSession(state.sessionId, {background});
   }
 
   byId("intake-form").addEventListener("submit", async (event) => {

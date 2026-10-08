@@ -24,7 +24,7 @@ AILAB_MODEL_MODE=replay PYTHONPATH=src python3 -m ailab_ops.cli serve --host 127
 
 证据面板保留 Evidence ID、来源工具、观察时间范围、原始片段、来源参数和元信息；来源完整性与片段截断分别展示。假设对照显示支持、反证和置信度，缺失引用明确显示尚无引用。报告包含根因、摘要、实质判断引用、已排除、未知和建议。引用跳回证据记录；“证据不足”也可以是已完成报告，不能把阶段完成理解为找到了确定根因。
 
-时间线使用服务端事件，不按浏览器推断重建。含审批的会话会另外读取最大 500 条事件窗口，超出窗口时提示截断。浏览器不声称拿到了窗口以外的完整审计历史。
+时间线使用服务端事件，不按浏览器推断重建。每条调用显示工具、模型和可跳转的关联证据；原生明细保留 usage、latency_ms、retry、error 以及服务端已脱敏的公开事件数据，按安全文本展示，不展示私密推理。含审批的会话会另外读取最大 500 条事件窗口，超出窗口时提示截断。浏览器不声称拿到了窗口以外的完整审计历史。
 
 已完成且有报告时可提交行动提案。GPU 案例可使用工具 `annotate_incident`，参数 `{"case_id":"case-gpu-assert","note":"已核查引用报告"}`，引用从当前证据记录复制；理由、风险、回滚都要填写。工具和参数仍由服务端策略校验。参数默认展开，pending 只显示批准和拒绝；填写操作者并确认批准后，approved 才显示单独的执行确认。拒绝须填写原因。模拟执行结果和审计事件保留在面板中，所有行动都是模拟。
 
@@ -33,6 +33,8 @@ AILAB_MODEL_MODE=replay PYTHONPATH=src python3 -m ailab_ops.cli serve --host 127
 ## 会话与错误
 
 浏览器仅在 localStorage 保存租户和当前 Session ID。重新载入会读取服务端详情和审计，不恢复审批确认、执行确认或操作者。恢复入口也可粘贴当前租户的 Session ID。租户变更会中止旧请求并清空当前调查和行动草稿。
+
+非终态每 2.5 秒发起的自动轮询是后台读取，不进入前台 busy、不禁用现有审批或抢走焦点。未变化的计划、证据、假设与报告保留节点，新增证据与时间线/审计事件保留既有未变行和 details 展开状态；相同状态消息不重复改写 live region。读请求在下一次前台恢复、创建或审批时中止，迟到响应由 generation 校验丢弃。真正变更的提案仍要求重新确认，不能为保留焦点而继续展示已失效的操作；服务端移除的记录或截断窗口外事件也不会凭空保留。
 
 取消按钮中止浏览器等待，不能保证服务端停止。POST 传输异常或写入后读取失败时，保留最后确认快照并禁用继续写入，直到完整刷新详情和审计成功。调查、证据、审批和 trace 均在服务进程内存中；重启即丢，不跨副本。租户和 actor 是模拟身份字段，没有生产认证或持久化承诺。
 
@@ -103,12 +105,14 @@ AILAB_MODEL_MODE=replay AILAB_USER_QPS=0 PYTHONPATH=src python3 -m ailab_ops.cli
 ```bash
 qa_dir=$(mktemp -d /tmp/v2-ui-browser-qa.XXXXXX)
 npm install --prefix "$qa_dir" chrome-aws-lambda@10.1.0 puppeteer-core@10.1.0 \
-  --registry=http://r.npm.sankuai.com --cache "$qa_dir/npm-cache" --no-audit --no-fund
+  --cache "$qa_dir/npm-cache" --no-audit --no-fund
 qa_browser=$(AWS_LAMBDA_FUNCTION_NAME=v2-ui-qa node -e \
   'require(process.argv[1]+"/node_modules/chrome-aws-lambda").executablePath.then(console.log)' "$qa_dir")
 NODE_PATH="$qa_dir/node_modules" node scripts/qa_v2_workspace.cjs \
   http://127.0.0.1:8098 "$qa_browser" "$qa_dir"
 ```
+
+上面的通用命令使用 npm 当前配置的源，不要求内部网络。仅在需要内网镜像的 CodeLab 环境，可在安装命令前额外设置 `npm_config_registry=http://r.npm.sankuai.com`；这不是项目或默认 QA 配置。所固定的旧 Chromium 适用于本机 glibc 2.17 的兼容性验证，不是推荐的生产浏览器版本；其他环境可自行提供兼容的 Puppeteer/浏览器路径。
 
 需要中文字体的环境先检查 `fc-list :lang=zh`；本机运行额外传入临时 `FONTCONFIG_FILE` 与 `FONTCONFIG_PATH` 指向含课程字体的配置，配置和缓存均在 QA 目录。脚本只接受 localhost 服务，创建的调查与模拟审批在该测试服务内存中。应用配置与项目依赖未变化。
 
@@ -143,6 +147,28 @@ node scripts/qa_v2_workspace.cjs http://127.0.0.1:8098 /tmp/chromium /tmp/v2-ui-
 ```
 
 真实浏览器脚本 exit 0；专项 26 passed；全套 490 passed、1 个原有 legacy skip。JS 语法与 diff whitespace 检查通过。
+
+## 整体审查修复：后台轮询与调用信息
+
+四项新回归先分别失败于阅读节点被替换、后台审批禁用、前台决策被后台 GET 阻挡和工具/模型调用字段缺失；补充的相同 live 状态写入与新增证据回归也先失败，随后通过。确定性 harness 直接执行交付脚本，触发真实注册的轮询回调并暂挂 GET，覆盖同快照、新事件/证据追加，以及前台审批中止旧读后迟到响应不能覆盖 approved。服务端 TestClient 产生含 `<tool-call>`、`<model-call>`、usage、latency_ms、retry、error 和关联 Evidence ID 的真实 TraceEvent；UI 文本与引用合同通过，unsafe HTML sink 会抛错。api_key 与 reasoning_content 在 presentation API 脱敏后不出现在 UI 文本；客户端仍以服务端脱敏响应为隐私边界，不直接访问原始 trace 或推理。
+
+沿用 `HeadlessChrome/92.0.4512.0`，以实际 2500ms 定时器跨越轮询周期，没有改短定时器或直接调用 refresh。四种桌面/窄屏、100%/200% 等价重排组合中，各在时间线 SUMMARY 与批准按钮上保持焦点，暂挂实际 GET 后分别检查读取中与完成后：activeElement 相同、审批可用、busy=false、证据/报告/时间线/审计阅读节点相同，所有打开的相关 details 均保持展开。共 8 次检查通过；每组真实 replay 时间线有 12 条带工具、10 条带模型的事件，其字段和关联证据链接均通过浏览器断言。
+
+本轮再次执行 28 次七状态检查、12 组 Tab/Shift+Tab 完整循环和原生键盘拒绝/批准/单独模拟执行，全部 exit 0；console/pageerror=0，scrollWidth=innerWidth（1440、720、390、195），无横向页面溢出。由于新增调用明细和时间线证据链接，completed/pending 焦点数较 round2 增多，正反顺序仍严格一致；结构化结果保留实际序列。截图和 `findings.json` 位于 `/tmp/v2-ui-browser-qa.8ecfAB/overall-fix-final/`，未提交。
+
+命令（服务启动方式同上）：
+
+```bash
+PYTHONPATH=src python3 -m pytest tests/test_v2_ui.py tests/test_v2_ui_flows.py tests/test_v2_ui_accessibility.py tests/test_v2_presentation_api.py -q
+PYTHONPATH=src python3 -m pytest -q
+PYTHONPATH=src python3 -m ailab_ops.cli replay --case case-gpu-assert
+NODE_PATH=/tmp/v2-ui-browser-qa.8ecfAB/node_modules \
+FONTCONFIG_FILE=/tmp/v2-ui-browser-qa.8ecfAB/fonts.conf \
+FONTCONFIG_PATH=/tmp/v2-ui-browser-qa.8ecfAB \
+node scripts/qa_v2_workspace.cjs http://127.0.0.1:8098 /tmp/chromium /tmp/v2-ui-browser-qa.8ecfAB/overall-fix-final
+```
+
+专项 59 passed；全套 494 passed、1 个原有 legacy skip。CLI smoke 完成有引用的 gpu_device_assert 报告，保留 search_runbooks 独立证据。JS 语法与 diff whitespace 检查通过。QA 安装命令已取消强制内部 registry，内部镜像仅为可选配置；没有新增 runtime 依赖、browser/cache 或截图提交。
 
 ## 剩余验证边界与教材截图
 
