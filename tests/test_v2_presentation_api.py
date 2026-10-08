@@ -1,6 +1,7 @@
 """Presentation contracts use real replay sessions and offline online transport."""
 
 import json
+from dataclasses import replace
 from datetime import timedelta
 
 import httpx
@@ -186,3 +187,60 @@ def test_approval_operations_hide_unknown_and_other_tenant_requests(client, oper
     assert client.post("/v2/approvals/" + request["request_id"] + "/" + operation, json=body).status_code == 404
     assert client.post("/v2/approvals/missing/" + operation, json=body).status_code == 404
     assert client.get("/v2/approvals/" + request["request_id"]).json()["status"] == "pending"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("reason", {"nested": "configured-approval-key"}),
+    ("api_key", "extra-api-key-value"),
+    ("private_reasoning", "private-approval-thought"),
+    ("hidden_labels", {"expected_findings": ["private-expected-finding"], "label": "private-label-value"}),
+])
+def test_invalid_proposal_conflict_does_not_echo_validation_input(field, value):
+    settings = replace(replay_settings(), llm_api_key="configured-approval-key")
+    with TestClient(create_app(build_runtime(settings))) as client:
+        result = create(client)
+        action = proposal(result)
+        action[field] = value
+        response = client.post("/v2/investigations/" + result["session_id"] + "/approvals",
+            json={"proposal": action})
+        assert response.status_code == 409
+        error = response.json()["error"]
+        assert error["kind"] == "approval_conflict" and error["retryable"] is False
+        assert "action." + field in error["message"]
+        assert ("string_type" if field == "reason" else "extra_forbidden") in error["message"]
+        for secret in ("configured-approval-key", "extra-api-key-value", "private-approval-thought",
+                       "private-expected-finding", "private-label-value", "input_value", "input_type"):
+            assert secret not in response.text
+        # The original exception also must be safe; HTTP redaction alone cannot
+        # protect logs or another caller of the source parsing boundary.
+        from ailab_ops.approvals import ApprovalError
+        with pytest.raises(ApprovalError) as caught:
+            client.app.state.rt.request_action(result["session_id"], action)
+        for secret in ("configured-approval-key", "extra-api-key-value", "private-approval-thought",
+                       "private-expected-finding", "private-label-value", "input_value", "input_type"):
+            assert secret not in str(caught.value)
+
+
+def test_invalid_note_length_conflict_retains_useful_argument_path(client):
+    result = create(client)
+    action = proposal(result)
+    action["arguments"]["note"] = ""
+    response = client.post("/v2/investigations/" + result["session_id"] + "/approvals",
+        json={"proposal": action})
+    assert response.status_code == 409
+    assert response.json()["error"]["kind"] == "approval_conflict"
+    assert "arguments.note" in response.json()["error"]["message"]
+    assert "minLength" in response.json()["error"]["message"]
+
+
+def test_conflict_response_redacts_configured_secrets_in_safe_field_paths():
+    settings = replace(replay_settings(), llm_api_key="unknown-field-configured-key")
+    with TestClient(create_app(build_runtime(settings))) as client:
+        result = create(client)
+        action = proposal(result)
+        action["unknown-field-configured-key"] = "unexpected-value"
+        response = client.post("/v2/investigations/" + result["session_id"] + "/approvals",
+            json={"proposal": action})
+        assert response.status_code == 409
+        assert "unknown-field-configured-key" not in response.text
+        assert "unexpected-value" not in response.text

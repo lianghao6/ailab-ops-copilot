@@ -72,7 +72,8 @@ def create_v2_app(runtime=None):
 
     @app.exception_handler(ApprovalError)
     async def conflict(request, exc):
-        return JSONResponse(status_code=409, content={"error": {"kind": "approval_conflict", "message": str(exc), "retryable": False}})
+        error = {"error": {"kind": "approval_conflict", "message": str(exc), "retryable": False}}
+        return JSONResponse(status_code=409, content=request.app.state.rt.present(error))
 
     @app.exception_handler(LimitExceeded)
     async def limited(request, exc):

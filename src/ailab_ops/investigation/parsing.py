@@ -81,8 +81,20 @@ def parse_control(content: str) -> Control:
         data = json.loads(content)
         json.dumps(data, allow_nan=False)
         return _CONTROL.validate_python(data)
-    except (ValueError, TypeError, ValidationError) as exc:
-        raise ControlError(str(exc)) from None
+    except ValidationError as exc:
+        # Pydantic's string rendering includes input_value/input_type and may
+        # expose credentials, private reasoning or labels. Retain only field
+        # locations and stable error types at the source, before any logging or
+        # wrapping as a public approval error. Messages/context can echo input.
+        issues = exc.errors(include_url=False, include_context=False, include_input=False)
+        summary = "; ".join(
+            f"{'.'.join(str(part) for part in issue['loc']) or 'control'} ({issue['type']})"
+            for issue in issues)
+        raise ControlError("invalid control: " + summary) from None
+    except json.JSONDecodeError:
+        raise ControlError("invalid control: invalid_json") from None
+    except (ValueError, TypeError):
+        raise ControlError("invalid control: invalid_json_value") from None
 
 
 def parse_arguments(call: ToolCall) -> dict[str, Any]:
