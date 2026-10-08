@@ -47,8 +47,10 @@ class InvestigationOrchestrator:
                  now: Callable[[], datetime] | None = None):
         self.gateway = gateway
         self.registry = registry
-        # The legacy injection seeds only the first session, by value. Never
-        # write back to it or reuse its first-observation identities across runs.
+        # The legacy injection is an empty, single-use test seam, not historical
+        # context. A nonempty store can replace current observations by identity.
+        if evidence_store is not None and evidence_store._evidence:
+            raise ValueError("Injected evidence_store must be empty; historical evidence cannot seed an investigation")
         self._initial_store = deepcopy(evidence_store) if evidence_store is not None else None
         self.evidence_store = EvidenceStore()
         self._persist = persist

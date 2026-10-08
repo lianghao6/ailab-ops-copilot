@@ -238,13 +238,19 @@ def test_new_runs_have_isolated_evidence_and_terminal_context_is_released():
         orchestrator.advance(InvestigationState("unknown", "Question", budget()))
 
 
-def test_injected_store_does_not_allow_report_to_cite_another_session():
+def test_prepopulated_store_is_rejected_before_history_can_enter_a_session():
     store = EvidenceStore()
-    foreign = store.add(Evidence("read_secret", {}, "Other session", "Other session"))
-    gateway = ScriptedGateway(call(), report([foreign.evidence_id]), report([foreign.evidence_id]))
-    _, state = run(gateway, evidence_store=store)
-    assert state.phase == InvestigationPhase.STOPPED
-    assert json.loads(gateway.requests[2][0][-1].content)["issues"][0]["code"] == "out_of_session_evidence"
+    historic = store.add(Evidence("read_logs", {"job_id": "job-1"}, "Historic summary", "same excerpt",
+                                 observed_time_range=("old-start", "old-end"), metadata={"private_context": "historic"}))
+    tools = registry()
+    tools.get("read_logs").fn = lambda job_id: ToolResult(True, evidence_items=[
+        Evidence("read_logs", {}, "Current summary", "same excerpt",
+                 observed_time_range=("new-start", "new-end"), metadata={"private_context": "current"})])
+    gateway = ScriptedGateway(call(), cited_report)
+    with pytest.raises(ValueError, match="empty"):
+        InvestigationOrchestrator(gateway, tools, evidence_store=store, now=lambda: NOW)
+    assert gateway.requests == [] and tools.call_log == []
+    assert store.get(historic.evidence_id) == historic
 
 
 @pytest.mark.parametrize("content", ['{}', '{"type":"plan","plan":"bad"}', 'not JSON'])
