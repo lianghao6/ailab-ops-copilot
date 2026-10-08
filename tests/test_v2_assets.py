@@ -12,6 +12,11 @@ ROOT = Path(__file__).resolve().parents[1] / "data" / "v2"
 CASE_IDS = ["case-collective-timeout", "case-gpu-assert", "case-insufficient-evidence"]
 
 
+def _utc_timestamp(value):
+    # Python 3.10 accepts an explicit UTC offset, but not the ISO Z suffix.
+    return datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+
+
 def _loader():
     # Import inside tests so the first red run reports a missing feature.
     from ailab_ops.cases import loader
@@ -95,11 +100,11 @@ def test_case_timestamps_and_references_are_consistent(case_id):
     for metric in world.metrics:
         job = jobs[metric["job_id"]]
         assert metric["step_s"] > 0 and metric["values"]
-        last = datetime.fromisoformat(metric["ts_start"]) + timedelta(
+        last = _utc_timestamp(metric["ts_start"]) + timedelta(
             seconds=metric["step_s"] * (len(metric["values"]) - 1)
         )
-        assert datetime.fromisoformat(job["started_at"]) <= datetime.fromisoformat(metric["ts_start"])
-        assert last <= datetime.fromisoformat(job["finished_at"])
+        assert _utc_timestamp(job["started_at"]) <= _utc_timestamp(metric["ts_start"])
+        assert last <= _utc_timestamp(job["finished_at"])
     for incident in world.incidents:
         assert incident["job_id"] in jobs
         assert incident["opened_at"] >= jobs[incident["job_id"]]["finished_at"]
