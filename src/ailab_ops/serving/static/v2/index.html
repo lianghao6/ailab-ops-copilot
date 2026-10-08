@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>调查工作台 · AILab Ops</title>
+  <link rel="stylesheet" href="/static/v2/app.css">
+  <script src="/static/v2/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#investigation">跳到调查内容</a>
+  <header class="masthead">
+    <a class="wordmark" href="/">AILab <span>OPS / FIELD NOTES</span></a>
+    <p>从可核查的证据，到可解释的判断。</p>
+    <span class="edition">调查手册 · V2</span>
+  </header>
+  <div id="mode-banner" class="mode-banner" role="status" aria-live="polite" data-mode="unknown">
+    <strong id="mode-label">正在核验运行模式</strong>
+    <span id="mode-copy">回放使用本地记录；在线使用服务配置的模型。所有行动均为模拟。</span>
+  </div>
+  <main class="workspace">
+    <aside class="intake-column" aria-label="调查入口与目录">
+      <section id="intake">
+        <p class="eyebrow">01 / INTAKE</p>
+        <h1>一件故障，<br>一份调查。</h1>
+        <p class="lede">选定案例、提出问题。让证据约束结论。</p>
+        <form id="intake-form">
+          <label for="tenant-id">租户标识</label>
+          <input id="tenant-id" name="tenant_id" value="tenant-01" required maxlength="100" autocomplete="off">
+          <div id="replay-case-field">
+            <label for="case-select">内置回放案例</label>
+            <select id="case-select" name="case_id">
+              <option value="case-gpu-assert">GPU device assert · 首发节点</option>
+              <option value="case-collective-timeout">Collective timeout · 通信超时</option>
+              <option value="case-insufficient-evidence">证据不足 · 保留未知</option>
+            </select>
+          </div>
+          <div id="online-case-field" hidden>
+            <label for="case-input">案例 / 作业标识</label>
+            <input id="case-input" maxlength="200" autocomplete="off" placeholder="由服务端校验的标识">
+            <p class="field-note">可用对象由当前服务配置决定。</p>
+          </div>
+          <label for="question">调查问题 <span class="optional">可选</span></label>
+          <textarea id="question" name="question" rows="3" maxlength="4000" placeholder="留空使用案例的默认问题"></textarea>
+          <p id="question-note" class="field-note">回放问题必须与已录制请求一致；未录制的请求会显示 replay miss。</p>
+          <button id="start-button" class="primary" type="submit" disabled>开始调查 <span aria-hidden="true">↗</span></button>
+        </form>
+        <details class="restore">
+          <summary>恢复已有调查</summary>
+          <form id="restore-form">
+            <label for="session-id">Session ID</label>
+            <input id="session-id" maxlength="200" required autocomplete="off" placeholder="粘贴当前租户的 session ID">
+            <button type="submit">打开调查</button>
+          </form>
+          <p class="field-note">会话保存在服务进程中；服务重启后可能失效。</p>
+        </details>
+      </section>
+      <nav class="contents" aria-label="调查目录">
+        <p class="eyebrow">IN THIS INVESTIGATION</p>
+        <a href="#evidence-board"><span>02</span> 证据记录</a>
+        <a href="#hypotheses"><span>03</span> 假设对照</a>
+        <a href="#cited-report"><span>04</span> 调查报告</a>
+        <a href="#timeline"><span>05</span> 事件时间线</a>
+        <a href="#action-panel"><span>06</span> 行动与审批</a>
+      </nav>
+      <p class="margin-note">身份字段用于模拟租户隔离。<br>本地仅记住租户与当前 session ID。</p>
+    </aside>
+    <article id="investigation" class="casebook" aria-labelledby="investigation-title">
+      <header class="investigation-header">
+        <p class="eyebrow">INVESTIGATION / <span id="case-reference">尚未建立</span></p>
+        <h2 id="investigation-title">把线索写成证据。</h2>
+        <p id="investigation-question" class="lede">调查计划、原始观察与引用将在这里展开。</p>
+        <div class="session-meta"><span id="session-reference">无当前会话</span><span id="budget-summary">—</span></div>
+      </header>
+      <ol id="phase-rail" class="phase-rail" aria-label="调查阶段">
+        <li data-phase="intake">接收问题</li><li data-phase="investigating">收集证据</li>
+        <li data-phase="validating">验证判断</li><li data-phase="awaiting_approval">审批</li>
+        <li data-phase="completed">完成</li><li data-phase="stopped">已停止</li>
+      </ol>
+      <div id="workspace-status" class="workspace-status" role="status" aria-live="polite" data-state="empty">选择一个案例，开始第一份调查。</div>
+      <section class="chapter" aria-labelledby="plan-title">
+        <div class="chapter-heading"><p class="eyebrow">THE APPROACH</p><h3 id="plan-title">调查计划</h3></div>
+        <ol id="plan-list" class="plan-list"><li class="empty">暂无调查计划。</li></ol>
+      </section>
+      <section id="evidence-board" class="chapter" aria-labelledby="evidence-title">
+        <div class="chapter-heading"><p class="eyebrow">02 / OBSERVATIONS</p><h3 id="evidence-title">证据记录 <span id="evidence-count" class="count">0</span></h3><p>记录来源、时间范围与原始片段。</p></div>
+        <div id="evidence-list" class="evidence-list"><p class="empty">暂无证据。调查完成后，来源和片段会保留在此。</p></div>
+      </section>
+      <section id="hypotheses" class="chapter" aria-labelledby="hypotheses-title">
+        <div class="chapter-heading"><p class="eyebrow">03 / ALTERNATIVES</p><h3 id="hypotheses-title">假设对照</h3></div>
+        <div id="hypothesis-list"><p class="empty">暂无假设。支持与反证会并列呈现。</p></div>
+      </section>
+      <section id="cited-report" class="chapter report-chapter" aria-labelledby="report-title">
+        <div class="chapter-heading"><p class="eyebrow">04 / FINDINGS</p><h3 id="report-title">调查报告</h3><p>每项实质判断都应能够回到证据。</p></div>
+        <div id="report-content"><p class="empty">尚未形成报告。</p></div>
+      </section>
+      <section id="timeline" class="chapter" aria-labelledby="timeline-title">
+        <div class="chapter-heading"><p class="eyebrow">05 / TRACE</p><h3 id="timeline-title">事件时间线</h3><p id="timeline-summary">暂无事件。</p></div>
+        <ol id="timeline-list" class="timeline-list"></ol>
+      </section>
+      <section id="action-panel" class="chapter" aria-labelledby="action-title">
+        <div class="chapter-heading"><p class="eyebrow">06 / HUMAN REVIEW</p><h3 id="action-title">行动与审批 <span class="badge">模拟</span></h3><p>审批状态与行动依据随会话保留。</p></div>
+        <div id="approval-list"><p class="empty">暂无行动提案。</p></div>
+        <div id="action-controls"></div>
+      </section>
+      <footer class="casebook-footer">AILab Ops Copilot <span>证据先行 · 保留未知 · 人工审阅</span></footer>
+    </article>
+  </main>
+  <noscript>调查工作台需要启用 JavaScript。API 可通过 /docs 查看。</noscript>
+</body>
+</html>

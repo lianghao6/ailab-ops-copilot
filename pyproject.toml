@@ -36,7 +36,13 @@ package-dir = { "" = "src" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-ailab_ops = ["datagen/*.yaml", "serving/static/*.html"]
+ailab_ops = [
+    "datagen/*.yaml",
+    "serving/static/*.html",
+    "serving/static/v2/*.html",
+    "serving/static/v2/*.css",
+    "serving/static/v2/*.js",
+]
 
 # Independent source assets are included in distributions without copying them
 # into the Python package. Non-editable deployments supply their data/v2 root.
