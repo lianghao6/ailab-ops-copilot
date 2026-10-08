@@ -329,7 +329,7 @@ def cmd_legacy_bench(args: argparse.Namespace) -> int:
         # local dataset that may differ from the one the server is serving.
         import httpx
 
-        from .bench import _is_local
+        from .bench.scenarios import _is_local
 
         try:
             with httpx.Client(timeout=10.0, trust_env=not _is_local(args.base_url)) as c:
@@ -338,7 +338,7 @@ def cmd_legacy_bench(args: argparse.Namespace) -> int:
                 job_ids = [j["job_id"] for j in r.json()["jobs"] if j["failed"]][:24]
         except Exception as exc:
             print(f"cannot reach {args.base_url} to discover jobs: {exc}", file=sys.stderr)
-            print("start the server first:  make serve", file=sys.stderr)
+            print("start the legacy server first:  make legacy-serve", file=sys.stderr)
             return 2
 
     if not job_ids:
