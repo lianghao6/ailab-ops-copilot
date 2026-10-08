@@ -28,9 +28,13 @@ def canonical_request_hash(messages: Sequence[ChatMessage], available_tool_names
             if call.raw_arguments:
                 try:
                     tool["arguments"] = json.loads(call.raw_arguments)
-                except json.JSONDecodeError:
+                    # Python accepts NaN/Infinity and overflows 1e999 to inf;
+                    # the canonical wire contract only accepts finite JSON.
+                    json.dumps(tool["arguments"], allow_nan=False)
+                except ValueError:
                     # Malformed arguments are still an input, and must produce
                     # an honest replay miss rather than a JSON parser failure.
+                    tool["arguments"] = {}
                     tool["invalid_raw_arguments"] = call.raw_arguments
             canonical["tool_calls"].append(tool)
         canonical_messages.append(canonical)
@@ -44,9 +48,13 @@ def _message(raw: dict[str, Any]) -> ChatMessage:
     for call in raw.get("tool_calls", []):
         function = call.get("function", call)
         arguments = function.get("arguments", {})
+        raw_arguments = call.get("raw_arguments", "")
         if isinstance(arguments, str):
-            arguments = json.loads(arguments)
-        calls.append(ToolCall(call["id"], function["name"], arguments))
+            raw_arguments = raw_arguments or arguments
+            arguments = {}
+        # Preserve the same wire-first semantics as a live ToolCall. Parsing
+        # happens once in canonical_request_hash, for both loading and lookup.
+        calls.append(ToolCall(call["id"], function["name"], arguments, raw_arguments))
     return ChatMessage(raw["role"], raw.get("content", ""), raw.get("name"), calls, raw.get("tool_call_id"))
 
 

@@ -140,6 +140,32 @@ def test_read_failure_after_stream_start_is_typed():
     assert "secret-key" not in str(error.value)
 
 
+@pytest.mark.parametrize("tail", ["", "data: [DONE]\n\n",
+    'data: {"error":{"message":"secret-key","type":"server_error"}}\n\n',
+    'event: error\ndata: {"message":"secret-key"}\n\n',
+    'data: {"choices":[{"delta":{},"finish_reason":"unknown"}]}\n\n'])
+def test_sse_incomplete_or_error_stream_refuses_partial_success(tail):
+    body = 'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n' + tail
+    with gateway(lambda request: httpx.Response(200, text=body,
+                 headers={"content-type": "text/event-stream"})) as model:
+        with pytest.raises(ModelBackendError) as error:
+            model.complete(MESSAGES, max_tokens=100)
+    assert error.value.kind == "protocol"
+    assert error.value.phase == "stream"
+    assert "secret-key" not in str(error.value)
+
+
+@pytest.mark.parametrize("tail", ["", "data: [DONE]\n\n"])
+def test_sse_valid_terminal_finish_reason_returns_complete_content(tail):
+    body = ('data: {"choices":[{"delta":{"content":"complete"}}]}\n\n'
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n') + tail
+    with gateway(lambda request: httpx.Response(200, text=body,
+                 headers={"content-type": "text/event-stream"})) as model:
+        response = model.complete(MESSAGES, max_tokens=100)
+    assert response.content == "complete"
+    assert response.finish_reason == FinishReason.STOP
+
+
 def test_replays_recorded_scenario_without_inventing_responses():
     model = ReplayModelGateway(REPLAY)
     response = model.complete(MESSAGES, TOOLS, max_tokens=100)
@@ -175,6 +201,51 @@ def test_replay_canonicalizes_arguments_and_tool_order_but_keeps_history_strict(
     with pytest.raises(ReplayMissError):
         model.complete([ChatMessage("assistant", tool_calls=[ToolCall("call-1", "read", raw_arguments="{bad")]),
                         messages[1]], tools, max_tokens=100)
+
+
+@pytest.mark.parametrize("recorded_call", [
+    {"id": "call-1", "name": "read", "arguments": {"stale": True}, "raw_arguments": '{"wire":2,"a":1}'},
+    {"id": "call-1", "type": "function", "function": {"name": "read", "arguments": '{"wire":2,"a":1}'}},
+])
+def test_replay_recording_and_query_use_same_wire_arguments(tmp_path, recorded_call):
+    record = {"messages": [{"role": "assistant", "tool_calls": [recorded_call]}],
+              "available_tool_names": [], "response": {"content": "wire match"}}
+    path = tmp_path / "replay.jsonl"
+    path.write_text(json.dumps(record) + "\n")
+    model = ReplayModelGateway(path)
+    assert model.complete([ChatMessage("assistant", tool_calls=[ToolCall("call-1", "read",
+        {"another_stale": True}, '{"a":1,"wire":2}')])], max_tokens=100).content == "wire match"
+    with pytest.raises(ReplayMissError):
+        model.complete([ChatMessage("assistant", tool_calls=[ToolCall("call-1", "read",
+            {"stale": True})])], max_tokens=100)
+    with pytest.raises(ReplayMissError):
+        model.complete([ChatMessage("assistant", tool_calls=[ToolCall("call-1", "read",
+            {"wire": 2, "a": 1}, '{"wire":3,"a":1}')])], max_tokens=100)
+
+
+@pytest.mark.parametrize("value", ["NaN", "Infinity", "1e999"])
+def test_replay_nonfinite_raw_arguments_are_typed_misses(value):
+    model = ReplayModelGateway(REPLAY)
+    messages = [ChatMessage("assistant", tool_calls=[ToolCall("call-1", "read",
+                 raw_arguments='{"value":' + value + '}')])]
+    with pytest.raises(ReplayMissError) as first:
+        model.complete(messages, max_tokens=100)
+    with pytest.raises(ReplayMissError) as second:
+        model.complete(messages, max_tokens=100)
+    assert first.value.kind == "replay_miss"
+    assert len(first.value.request_hash) == 64
+    assert first.value.request_hash == second.value.request_hash
+
+
+def test_native_raw_arguments_cannot_false_hit_parsed_cache(tmp_path):
+    record = {"messages": [{"role": "assistant", "tool_calls": [{"id": "call-1", "name": "read",
+        "arguments": {"stale": True}, "raw_arguments": '{"wire":2}'}]}],
+        "available_tool_names": [], "response": {"content": "wire-only recording"}}
+    path = tmp_path / "replay.jsonl"
+    path.write_text(json.dumps(record) + "\n")
+    with pytest.raises(ReplayMissError):
+        ReplayModelGateway(path).complete([ChatMessage("assistant", tool_calls=[
+            ToolCall("call-1", "read", {"stale": True})])], max_tokens=100)
 
 
 def test_settings_and_factory_select_modes(monkeypatch):

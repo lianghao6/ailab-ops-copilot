@@ -99,8 +99,11 @@ class OpenAIModelGateway(OpenAICompatClient):
         finish = FinishReason.STOP
         usage: Usage | None = None
         saw_choice = False
+        saw_terminal = False
         model = self.model
         for line in response.iter_lines():
+            if line.startswith("event:") and line[6:].strip() == "error":
+                raise ModelBackendError("Model backend emitted a stream error", kind="protocol", phase="stream")
             if not line.startswith("data:"):
                 continue
             data = line[5:].strip()
@@ -110,6 +113,8 @@ class OpenAIModelGateway(OpenAICompatClient):
                 chunk = json.loads(data)
             except json.JSONDecodeError:
                 continue
+            if chunk.get("error") is not None:
+                raise ModelBackendError("Model backend emitted a stream error", kind="protocol", phase="stream")
             model = chunk.get("model") or model
             if chunk.get("usage") is not None:
                 usage = _usage_from(chunk["usage"])
@@ -130,9 +135,15 @@ class OpenAIModelGateway(OpenAICompatClient):
                         slot["name"] = function["name"]
                     slot["args"] += function.get("arguments") or ""
                 if choice.get("finish_reason"):
-                    finish = _finish_from(choice["finish_reason"])
+                    reason = choice["finish_reason"]
+                    if reason not in {"stop", "length", "tool_calls", "function_call"}:
+                        raise ModelBackendError("Invalid model backend stream finish reason", kind="protocol", phase="stream")
+                    finish = _finish_from(reason)
+                    saw_terminal = True
         if not saw_choice:
-            raise ModelBackendError("Model backend stream contained no choices", kind="protocol")
+            raise ModelBackendError("Model backend stream contained no choices", kind="protocol", phase="stream")
+        if not saw_terminal:
+            raise ModelBackendError("Model backend stream ended before a terminal finish reason", kind="protocol", phase="stream")
         tool_calls = [ToolCall(slot["id"] or f"call_{index}", slot["name"], _parse_args(slot["args"]), slot["args"])
                       for index, slot in sorted(slots.items()) if slot["name"]]
         content = "".join(parts)
