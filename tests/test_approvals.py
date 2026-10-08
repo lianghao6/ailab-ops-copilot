@@ -37,6 +37,18 @@ def create(service, context):
     return service.create(context, "restart", {"job_id": "job-1"})
 
 
+@pytest.fixture
+def simulation_executions(monkeypatch):
+    """Count actual simulation calls while retaining the real handler behavior."""
+    original = SimulatedActionHandler.execute
+    executions = []
+    def counted_execute(handler, arguments):
+        executions.append(deepcopy(arguments))
+        return original(handler, arguments)
+    monkeypatch.setattr(SimulatedActionHandler, "execute", counted_execute)
+    return executions
+
+
 def test_policy_automatically_allows_read_but_never_directly_allows_action():
     tools, context, _, service = setup()
     read = service.policy.authorize(PolicyContext("session-a"), tools.get("read_logs"), {"job_id": "job-1"})
@@ -226,6 +238,46 @@ def test_concurrent_duplicate_execution_reuses_one_stored_result():
     assert [e.event for e in service.store.audit_events].count("execution_replayed") == 7
 
 
+def test_executing_observer_failure_is_audited_without_interrupting_execution_or_replay(simulation_executions):
+    _, context, _, service = setup()
+    request = create(service, context)
+    notified = []
+    def observer(saved):
+        notified.append(saved.status)
+        if saved.status == "executing":
+            raise RuntimeError("sensitive observer detail")
+    service.watch(request.request_id, observer)
+    service.approve(request.request_id, actor="operator")
+    result = service.execute(request.request_id, actor="operator")
+    replay = service.execute(request.request_id, actor="operator")
+    assert result == replay == {"simulated": True, "worker": "restarted"}
+    assert service.store.get(request.request_id).status == "executed"
+    assert notified == ["approved", "executing", "executed"]
+    failures = [e for e in service.store.audit_events if e.event == "notification_failed"]
+    assert len(failures) == 1 and failures[0].request_id == request.request_id
+    assert failures[0].details == {"status": "executing", "error": "RuntimeError"}
+    assert "sensitive observer detail" not in json.dumps([e.to_dict() for e in service.store.audit_events])
+    assert [e.event for e in service.store.audit_events].count("execution_started") == 1
+    assert simulation_executions == [{"job_id": "job-1"}]
+
+
+def test_terminal_observer_failure_preserves_stored_result_for_idempotent_execution(simulation_executions):
+    _, context, _, service = setup()
+    request = create(service, context)
+    def observer(saved):
+        if saved.status == "executed":
+            raise RuntimeError("notification unavailable")
+    service.watch(request.request_id, observer)
+    service.approve(request.request_id, actor="operator")
+    result = service.execute(request.request_id, actor="operator")
+    assert service.execute(request.request_id, actor="operator") == result
+    assert service.store.get(request.request_id).status == "executed"
+    assert [e.details["status"] for e in service.store.audit_events
+            if e.event == "notification_failed"] == ["executed"]
+    assert [e.event for e in service.store.audit_events].count("execution_started") == 1
+    assert simulation_executions == [{"job_id": "job-1"}]
+
+
 def test_action_is_reauthorized_before_execution_if_evidence_or_tool_changes():
     tools, context, _, service = setup()
     request = create(service, context)
@@ -321,6 +373,72 @@ def test_expiry_sweep_completes_awaiting_investigation_and_preserves_report():
     assert saved.phase == InvestigationPhase.COMPLETED and saved.report == state.report
     assert saved.stop_reason == "approval_expired"
     assert orchestrator.approval_service.expire() == ()
+
+
+@pytest.mark.parametrize("terminal", ["executed", "rejected", "expired"])
+def test_terminal_persistence_failure_keeps_consistent_state_and_releases_session(terminal, simulation_executions):
+    orchestrator, state, proposal = diagnosis()
+    clock = [NOW]
+    orchestrator.approval_service._now = lambda: clock[0]
+    request = orchestrator.request_action(state.session_id, proposal)
+    captured = []
+    def persist(saved):
+        if saved.phase == InvestigationPhase.COMPLETED:
+            captured.append(orchestrator.get_evidence(saved.session_id, saved.evidence_ids[0]))
+            raise RuntimeError("sensitive persistence detail")
+    orchestrator._persist = persist
+    if terminal == "executed":
+        orchestrator.approval_service.approve(request.request_id, actor="operator")
+        result = orchestrator.approval_service.execute(request.request_id, actor="operator")
+        assert orchestrator.approval_service.execute(request.request_id, actor="operator") == result
+        assert result == {"simulated": True, "worker": "restarted"}
+        events = [e.event for e in orchestrator.approval_service.store.audit_events]
+        assert events.count("execution_started") == 1 and events.count("executed") == 1
+    elif terminal == "rejected":
+        orchestrator.approval_service.reject(request.request_id, actor="operator", reason="Too risky")
+    else:
+        clock[0] += timedelta(minutes=15)
+        assert len(orchestrator.approval_service.expire()) == 1
+    saved = orchestrator.states[state.session_id]
+    assert orchestrator.approval_service.store.get(request.request_id).status == terminal
+    assert saved.phase == InvestigationPhase.COMPLETED and saved.report == state.report
+    assert state.session_id not in orchestrator.sessions
+    assert captured == [orchestrator.get_evidence(state.session_id, state.evidence_ids[0])]
+    errors = orchestrator.persistence_errors
+    assert len(errors) == 1
+    assert errors[0]["session_id"] == state.session_id
+    assert errors[0]["event"] == "action_" + terminal and errors[0]["error"] == "RuntimeError"
+    assert "sensitive persistence detail" not in json.dumps(errors)
+    errors[0]["error"] = "tampered"
+    assert orchestrator.persistence_errors[0]["error"] == "RuntimeError"
+    assert simulation_executions == ([{"job_id": "job-1"}] if terminal == "executed" else [])
+
+
+def test_diagnosis_terminal_persist_failure_does_not_break_report_or_evidence_cleanup():
+    tools, _, _, _ = setup()
+    def persist(saved):
+        if saved.phase == InvestigationPhase.COMPLETED:
+            raise RuntimeError("storage unavailable")
+    orchestrator = InvestigationOrchestrator(ScriptedGateway(call(), cited_report), tools,
+                                             now=lambda: NOW, persist=persist)
+    state = orchestrator.run("Failure", case_id=None, budget=budget())
+    assert state.phase == InvestigationPhase.COMPLETED and state.report is not None
+    assert state.session_id not in orchestrator.sessions
+    assert orchestrator.get_evidence(state.session_id, state.evidence_ids[0]) is not None
+    assert orchestrator.persistence_errors[0]["event"] == "completed"
+
+
+def test_stopped_persist_failure_still_archives_partial_evidence_and_releases_session():
+    tools, _, _, _ = setup()
+    def persist(saved):
+        if saved.phase == InvestigationPhase.STOPPED:
+            raise RuntimeError("storage unavailable")
+    orchestrator = InvestigationOrchestrator(ScriptedGateway(call()), tools, now=lambda: NOW, persist=persist)
+    state = orchestrator.run("Failure", case_id=None, budget=budget(max_steps=1))
+    assert state.phase == InvestigationPhase.STOPPED and "steps" in state.stop_reason
+    assert state.session_id not in orchestrator.sessions
+    assert orchestrator.get_evidence(state.session_id, state.evidence_ids[0]) is not None
+    assert orchestrator.persistence_errors[0]["event"] == "stopped"
 
 
 def test_awaiting_persist_can_resolve_live_approval_and_terminal_persist_can_resolve_result():

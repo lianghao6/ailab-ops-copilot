@@ -68,13 +68,26 @@ class ApprovalService:
             request.session_id if request else session_id, event, actor, self._now(), deepcopy(details)))
 
     def _save(self, request: ApprovalRequest) -> ApprovalRequest:
+        # Commit the lifecycle before best-effort observers. Notification must
+        # not strand execution or invalidate a stored idempotent result.
         self.store._save(request)
-        observer = self._observers.get(request.request_id)
-        if observer is not None:
-            observer(deepcopy(request))
-        if request.status in {"executed", "rejected", "expired", "failed"}:
-            self._observers.pop(request.request_id, None)
+        self._notify(request)
         return deepcopy(request)
+
+    def _notify(self, request: ApprovalRequest) -> None:
+        observer = self._observers.get(request.request_id)
+        try:
+            if observer is not None:
+                observer(deepcopy(request))
+        except Exception as exc:
+            # Exception messages may contain credentials or private backend
+            # payloads. Status, request identity and exception type are enough
+            # to make the failed extension observable without exposing them.
+            self._audit("notification_failed", "system", request,
+                        status=request.status, error=type(exc).__name__)
+        finally:
+            if request.status in {"executed", "rejected", "expired", "failed"}:
+                self._observers.pop(request.request_id, None)
 
     def _get(self, request_id: str, actor: str, operation: str) -> ApprovalRequest:
         if not isinstance(actor, str) or not actor.strip():

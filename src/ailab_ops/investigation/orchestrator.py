@@ -64,6 +64,7 @@ class InvestigationOrchestrator:
         # or events are retained here; durable storage can use the callback.
         self.states: dict[str, InvestigationState] = {}
         self._evidence_archive: dict[str, dict[str, Evidence]] = {}
+        self._persistence_errors: list[dict[str, Any]] = []
         self.policy = PolicyEngine(registry, evidence_lookup=self.get_evidence)
         self.approval_service = ApprovalService(self.policy, approval_store, now=self._now)
 
@@ -206,24 +207,40 @@ class InvestigationOrchestrator:
         session.state.phase = InvestigationPhase.COMPLETED
         session.state.stop_reason = None if request.status == "executed" else "approval_" + request.status
         self._save(session, "action_" + request.status)
-        self.sessions.pop(session.state.session_id, None)
+
+    @property
+    def persistence_errors(self) -> tuple[dict[str, Any], ...]:
+        """Isolated failure records for best-effort state persistence callbacks."""
+        return tuple(deepcopy(self._persistence_errors))
 
     def _save(self, session: InvestigationSession, event: str) -> None:
         session.events.append({"event": event, "step": session.state.budget.steps_used})
         self.states[session.state.session_id] = deepcopy(session.state)
-        if session.state.phase in {InvestigationPhase.COMPLETED, InvestigationPhase.STOPPED}:
-            self._evidence_archive[session.state.session_id] = {
+        terminal = session.state.phase in {InvestigationPhase.COMPLETED, InvestigationPhase.STOPPED}
+        if terminal:
+            archive = {
                 evidence_id: session.evidence_store.get(evidence_id)
                 for evidence_id in session.state.evidence_ids
             }
-        if self._persist is not None:
-            self._persist(deepcopy(session.state))
+            self._evidence_archive[session.state.session_id] = archive
+        try:
+            if self._persist is not None:
+                self._persist(deepcopy(session.state))
+        except Exception as exc:
+            self._persistence_errors.append({
+                "session_id": session.state.session_id, "event": event,
+                "phase": session.state.phase.value, "error": type(exc).__name__,
+                "occurred_at": self._now().isoformat(),
+            })
+        finally:
+            if terminal:
+                self._evidence_archive[session.state.session_id] = archive
+                self.sessions.pop(session.state.session_id, None)
 
     def _stop(self, session: InvestigationSession, reason: str) -> InvestigationState:
         session.state.phase = InvestigationPhase.STOPPED
         session.state.stop_reason = reason
         self._save(session, "stopped")
-        self.sessions.pop(session.state.session_id, None)
         return session.state
 
     def _stop_if_exhausted(self, session: InvestigationSession, *, include_steps: bool = True) -> bool:
@@ -353,7 +370,6 @@ class InvestigationOrchestrator:
         state.report = report
         state.phase = InvestigationPhase.COMPLETED
         self._save(session, "completed")
-        self.sessions.pop(state.session_id, None)
 
     def _report_issues(self, session: InvestigationSession, issues: list[ValidationIssue]) -> None:
         session.report_failures += 1
