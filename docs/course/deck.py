@@ -279,13 +279,46 @@ class VectorDiagram(Flowable):
         if isinstance(block, Diagram):
             self.box_width = WIDTH * .68
             self.heights = [max(38, p.wrap(self.box_width - 18, 1000)[1] + 16) for p in self.labels]
-            self.height = sum(self.heights) + 34 * (len(labels) - 1)
+            self.gaps = [34] * (len(labels) - 1)
+            self.edge_labels = []
+            for a, b, text in block.edges:
+                if a == b:
+                    raise ValueError("flow self-loops need a separate explanatory figure")
+                adjacent = abs(a - b) == 1
+                width = WIDTH / 2 - 15 if adjacent else (WIDTH - self.box_width) / 2 - 20
+                p = _paragraph(text, st["caption"])
+                ph = p.wrap(width, 1000)[1]
+                if adjacent:
+                    self.gaps[min(a, b)] = max(self.gaps[min(a, b)], ph + 12)
+                self.edge_labels.append((p, ph))
+            self.height = sum(self.heights) + sum(self.gaps)
+            self.boxes, y = [], self.height
+            for i, height in enumerate(self.heights):
+                self.boxes.append((y - height, y))
+                y -= height + (self.gaps[i] if i < len(self.gaps) else 0)
+            for (a, b, _), (_, ph) in zip(block.edges, self.edge_labels):
+                if abs(a - b) != 1:
+                    midpoint = (sum(self.boxes[a]) + sum(self.boxes[b])) / 4
+                    if ph / 2 + 6 > min(midpoint, self.height - midpoint):
+                        raise ValueError("exterior flow label does not fit; shorten label or split the figure")
         else:
             self.column = WIDTH / len(labels)
             self.top = max(40, max(p.wrap(self.column - 14, 1000)[1] for p in self.labels) + 14)
-            self.height = self.top + 38 * len(block.messages) + 12
+            self.message_labels = []
+            for a, b, text in block.messages:
+                if a == b:
+                    left, span = a * self.column + 7, self.column - 14
+                else:
+                    left = (min(a, b) + .5) * self.column + 6
+                    span = abs(a - b) * self.column - 12
+                if span <= 0:
+                    raise ValueError("sequence label has no room; use fewer participants")
+                p = _paragraph(text, st["caption"])
+                ph = p.wrap(span, 1000)[1]
+                self.message_labels.append((p, left, ph, max(38, ph + 24)))
+            self.height = self.top + sum(item[3] for item in self.message_labels) + 12
         if self.height > 650:
-            raise ValueError("diagram exceeds one page; split into smaller figures")
+            raise ValueError("diagram and labels exceed one page; shorten labels or split into smaller figures")
 
     def wrap(self, availWidth, availHeight):
         return self.width, self.height
@@ -303,33 +336,23 @@ class VectorDiagram(Flowable):
         c.setStrokeColor(ACCENT)
         if isinstance(self.block, Diagram):
             left = (WIDTH - self.box_width) / 2
-            y, boxes = self.height, []
-            for p, height in zip(self.labels, self.heights):
-                bottom = y - height
+            for p, height, (bottom, _) in zip(self.labels, self.heights, self.boxes):
                 c.setFillColor(colors.HexColor("#edf3f8"))
                 c.roundRect(left, bottom, self.box_width, height, 4, fill=1)
                 ph = p.wrap(self.box_width - 18, height)[1]
                 p.drawOn(c, left + 9, bottom + (height - ph) / 2)
-                boxes.append((bottom, y))
-                y = bottom - 34
-            for a, b, label in self.block.edges:
-                if a == b:
-                    raise ValueError("flow self-loops need a separate explanatory figure")
+            for (a, b, _), (p, ph) in zip(self.block.edges, self.edge_labels):
                 if abs(a - b) == 1:
-                    y1 = boxes[a][0] if b > a else boxes[a][1]
-                    y2 = boxes[b][1] if b > a else boxes[b][0]
+                    y1 = self.boxes[a][0] if b > a else self.boxes[a][1]
+                    y2 = self.boxes[b][1] if b > a else self.boxes[b][0]
                     self.arrow(WIDTH / 2, y1, WIDTH / 2, y2)
-                    p = _paragraph(label, self.st["caption"])
-                    ph = p.wrap(WIDTH / 2 - 15, 100)[1]
                     p.drawOn(c, WIDTH / 2 + 9, (y1 + y2 - ph) / 2)
                 else:
                     side = left - 12
-                    y1, y2 = sum(boxes[a]) / 2, sum(boxes[b]) / 2
+                    y1, y2 = sum(self.boxes[a]) / 2, sum(self.boxes[b]) / 2
                     c.line(left, y1, side, y1)
                     c.line(side, y1, side, y2)
                     self.arrow(side, y2, left, y2)
-                    p = _paragraph(label, self.st["caption"])
-                    ph = p.wrap(max(20, left - 20), 100)[1]
                     p.drawOn(c, 0, (y1 + y2 - ph) / 2)
         else:
             centers = [(i + .5) * self.column for i in range(len(self.labels))]
@@ -339,8 +362,9 @@ class VectorDiagram(Flowable):
                 c.setDash(2, 3)
                 c.line(x, self.height - self.top, x, 0)
                 c.setDash()
-            for i, (a, b, label) in enumerate(self.block.messages):
-                y = self.height - self.top - 28 - i * 38
+            offset = 0
+            for (a, b, _), (p, left, ph, spacing) in zip(self.block.messages, self.message_labels):
+                y = self.height - self.top - ph - 18 - offset
                 if a == b:
                     x = centers[a]
                     c.line(x, y + 8, x + 12, y + 8)
@@ -348,12 +372,8 @@ class VectorDiagram(Flowable):
                     self.arrow(x + 12, y, x, y)
                 else:
                     self.arrow(centers[a], y, centers[b], y)
-                p = _paragraph(label, self.st["caption"])
-                span = max(self.column - 14, abs(centers[a] - centers[b]) - 12)
-                ph = p.wrap(span, 100)[1]
-                if ph > 28:
-                    raise ValueError("sequence message too long; use prose for details")
-                p.drawOn(c, min(centers[a], centers[b]) + 6, y + 4)
+                p.drawOn(c, left, y + 12)
+                offset += spacing
         c.restoreState()
 
 

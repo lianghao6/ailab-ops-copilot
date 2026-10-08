@@ -191,3 +191,78 @@ def test_chapter_boundary_collapses_redundant_page_breaks(tmp_path):
     assert len(reader.pages) == 4
     assert "章节正文" in reader.pages[2].extract_text()
     assert "章节正文" in reader.pages[3].extract_text()
+
+
+def diagram_text_geometry(block, tmp_path):
+    """Measure actual PDF text positions after all canvas transforms."""
+    from reportlab.pdfgen.canvas import Canvas
+    from reportlab.pdfbase import pdfmetrics
+    d = engine()
+    d.register_fonts()
+    figure = d.VectorDiagram(block, d._styles())
+    path = tmp_path / "geometry.pdf"
+    canvas = Canvas(str(path), pagesize=(595.276, 841.89))
+    figure.drawOn(canvas, 56.693, 100)
+    canvas.save()
+    boxes, filled_paths, path_points = [], [], []
+    def capture(text, cm, tm, font, size):
+        for line in text.splitlines():
+            if not line:
+                continue
+            x = tm[4] * cm[0] + tm[5] * cm[2] + cm[4]
+            y = tm[4] * cm[1] + tm[5] * cm[3] + cm[5]
+            width = pdfmetrics.stringWidth(line, d.SANS, size)
+            boxes.append((line, x, y - size * .25, x + width, y + size))
+    def capture_path(operator, operands, cm, tm):
+        if operator == b"n":
+            path_points.clear()
+        elif operator in (b"m", b"l", b"c"):
+            for i in range(0, len(operands), 2):
+                x, y = float(operands[i]), float(operands[i + 1])
+                path_points.append((x * cm[0] + y * cm[2] + cm[4], x * cm[1] + y * cm[3] + cm[5]))
+        elif operator in (b"B", b"B*", b"f", b"f*") and path_points:
+            xs, ys = zip(*path_points)
+            filled_paths.append((min(xs), min(ys), max(xs), max(ys)))
+    PdfReader(path).pages[0].extract_text(visitor_text=capture, visitor_operand_before=capture_path)
+    return figure, boxes, filled_paths
+
+
+def test_last_sequence_self_call_is_inside_actual_pdf_text_area(tmp_path):
+    d = engine()
+    _, boxes, _ = diagram_text_geometry(d.SequenceDiagram(["用户", "Agent", "工具"], [
+        (2, 2, "检查参数并形成候选调查假设以后继续读取新的证据")]), tmp_path)
+    assert any("检查" in text for text, *_ in boxes)
+    assert all(56.693 <= x1 < x2 <= 538.583 for _, x1, _, x2, _ in boxes)
+
+
+def test_adjacent_flow_label_does_not_overlap_actual_node_boxes(tmp_path):
+    d = engine()
+    figure, boxes, nodes = diagram_text_geometry(d.Diagram(["节点甲", "节点乙"], [
+        (0, 1, "连线标签说明" * 25)]), tmp_path)
+    labels = [box for box in boxes if not box[0].startswith("节点")]
+    assert labels and len(nodes) == 2
+    for _, lx1, ly1, lx2, ly2 in labels:
+        assert 56.693 <= lx1 < lx2 <= 538.583
+        assert 100 <= ly1 < ly2 <= 100 + figure.height
+        for nx1, ny1, nx2, ny2 in nodes:
+            assert lx2 <= nx1 or lx1 >= nx2 or ly2 <= ny1 or ly1 >= ny2
+
+
+def test_wrapped_exterior_flow_label_is_bounded_and_clear_of_nodes(tmp_path):
+    d = engine()
+    figure, boxes, nodes = diagram_text_geometry(d.Diagram(["节点甲", "节点乙", "节点丙"], [
+        (0, 2, "外围连线说明" * 3)]), tmp_path)
+    labels = [box for box in boxes if not box[0].startswith("节点")]
+    assert labels and len(nodes) == 3
+    for _, lx1, ly1, lx2, ly2 in labels:
+        assert 56.693 <= lx1 < lx2 <= 538.583
+        assert 100 <= ly1 < ly2 <= 100 + figure.height
+        for nx1, ny1, nx2, ny2 in nodes:
+            assert lx2 <= nx1 or lx1 >= nx2 or ly2 <= ny1 or ly1 >= ny2
+
+
+def test_excessive_flow_labels_get_authoring_error(tmp_path):
+    d = engine()
+    for edge in [(0, 1, "过长连线说明" * 400), (0, 2, "过长外围连线说明" * 100)]:
+        with pytest.raises(ValueError, match="label|标签"):
+            diagram_text_geometry(d.Diagram(["节点甲", "节点乙", "节点丙"], [edge]), tmp_path)
