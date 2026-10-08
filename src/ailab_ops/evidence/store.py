@@ -16,7 +16,7 @@ class EvidenceStore:
         self._evidence: dict[str, Evidence] = {}
 
     def add(self, evidence: Evidence) -> Evidence:
-        """Keep the first observation for a canonical tool, arguments and excerpt."""
+        """Keep the first observation and return an independent copy."""
         source = json.dumps(
             {"source_tool": evidence.source_tool, "arguments": evidence.arguments, "excerpt": evidence.excerpt},
             sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False,
@@ -24,10 +24,10 @@ class EvidenceStore:
         evidence_id = "ev-" + sha256(source.encode("utf-8")).hexdigest()
         if evidence_id not in self._evidence:
             self._evidence[evidence_id] = replace(deepcopy(evidence), evidence_id=evidence_id)
-        return self._evidence[evidence_id]
+        return deepcopy(self._evidence[evidence_id])
 
     def get(self, evidence_id: str) -> Evidence | None:
-        return self._evidence.get(evidence_id)
+        return deepcopy(self._evidence.get(evidence_id))
 
     def to_context(self, ids: Iterable[str]) -> list[dict[str, Any]]:
         """Return independent JSON-ready records in requested citation order.

@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from ailab_ops.evidence import Evidence, EvidenceRelation, EvidenceStore, validate_report
 from ailab_ops.investigation import Claim, InvestigationReport
 
@@ -13,8 +15,8 @@ def test_store_assigns_stable_ids_and_deduplicates_identical_sources():
     duplicate = store.add(Evidence("read_logs", {"filters": {"level": "error", "rank": 0}, "job_id": "job-1"},
                                    "Another summary", "CUDA out of memory"))
     assert first.evidence_id.startswith("ev-")
-    assert duplicate is first
-    assert store.get(first.evidence_id) is first
+    assert duplicate == first
+    assert store.get(first.evidence_id) == first
     assert store.get("unknown") is None
     independent = EvidenceStore().add(Evidence("read_logs", first.arguments, "New summary", first.excerpt))
     assert independent.evidence_id == first.evidence_id
@@ -25,6 +27,38 @@ def test_store_assigns_stable_ids_and_deduplicates_identical_sources():
     assert [item["evidence_id"] for item in store.to_context([first.evidence_id, second.evidence_id])] == [
         first.evidence_id, second.evidence_id,
     ]
+
+
+@pytest.mark.parametrize("returned_by", ["add", "get"])
+def test_store_returned_evidence_cannot_mutate_stored_snapshot(returned_by):
+    store = EvidenceStore()
+    source = Evidence("read_logs", {"job_id": "job-1", "filters": {"rank": 0}},
+                      "Allocator failed", "CUDA out of memory", metadata={"location": {"line": 42}})
+    added = store.add(source)
+    original_id = added.evidence_id
+    returned = added if returned_by == "add" else store.get(original_id)
+    returned.evidence_id = "ev-forged"
+    returned.excerpt = "No failure"
+    returned.arguments["filters"]["rank"] = 99
+    returned.metadata["location"]["line"] = 999
+
+    stored = store.get(original_id)
+    assert stored.evidence_id == original_id
+    assert stored.excerpt == "CUDA out of memory"
+    assert stored.arguments == {"job_id": "job-1", "filters": {"rank": 0}}
+    assert stored.metadata == {"location": {"line": 42}}
+    assert store.get("ev-forged") is None
+    assert source.evidence_id == ""
+    assert source.excerpt == "CUDA out of memory"
+    assert source.arguments == {"job_id": "job-1", "filters": {"rank": 0}}
+    assert store.add(source) == stored
+    assert store.to_context([original_id]) == [{
+        "evidence_id": original_id, "source_tool": "read_logs",
+        "arguments": {"job_id": "job-1", "filters": {"rank": 0}},
+        "summary": "Allocator failed", "excerpt": "CUDA out of memory",
+        "observed_time_range": None, "truncated": False, "relation": "related",
+        "hypothesis_id": None, "metadata": {"location": {"line": 42}},
+    }]
 
 
 def test_context_marks_truncated_evidence():
