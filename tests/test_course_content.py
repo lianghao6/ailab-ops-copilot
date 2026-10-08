@@ -269,3 +269,104 @@ def test_chapter_three_v1_baseline_sweep_is_reproducible_and_labelled(chapter_th
     assert "faults.yaml" in text and "seed=20260929" in text
     assert "PYTHONHASHSEED=0" in text and "同分" in text
     assert "不是 V2" in text and "共享" in text
+
+
+@pytest.fixture(scope="module")
+def chapter_four(tmp_path_factory):
+    module = importlib.import_module("lessons.l4")
+    path = deck.build(module.LESSON, tmp_path_factory.mktemp("chapter-four") / "lesson-4.pdf")
+    reader = PdfReader(path)
+    return module, reader, "\n".join(page.extract_text() for page in reader.pages)
+
+
+def test_chapter_four_publishes_current_security_contract(chapter_four):
+    module, reader, text = chapter_four
+    assert reader.metadata.title == "第 4 课 · 安全边界与人工审批"
+    for concept in ("最小权限", "提示注入", "人工编写回放", "authored replay", "敏感字段",
+                    "allow_read", "require_approval", "deny", "annotate_incident",
+                    "reason", "risk", "rollback", "evidence_ids", "expires_at",
+                    "approved_by", "execution_replayed", "approval_expired", "课后阅读"):
+        assert concept in text
+    for stale in ("口语化讲稿", "小面试", "实操 1", "kill the model service", "不调模型一样能出诊断"):
+        assert stale not in text
+    assert any(isinstance(b, deck.SequenceDiagram) for b in module.LESSON.blocks)
+    assert any(isinstance(b, deck.Diagram) for b in module.LESSON.blocks)
+    assert "没有独立" in text and "预期影响" in text
+    assert "未经认证" in text and "进程" in text and "模拟" in text
+
+
+def test_chapter_four_source_excerpts_match_current_code(chapter_four):
+    module, _, text = chapter_four
+    for source in (b for b in module.LESSON.blocks if isinstance(b, deck.Source)):
+        path = ROOT / source.path
+        assert path.is_file(), source.path
+        assert source.path in text
+        if path.suffix == ".py" and source.symbol:
+            names = {n.name for n in ast.walk(ast.parse(path.read_text()))
+                     if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+            assert source.symbol.split(".")[-1] in names, source
+    for i, block in enumerate(module.LESSON.blocks[:-1]):
+        if isinstance(block, deck.Code) and block.caption.startswith("源码摘录"):
+            source = module.LESSON.blocks[i + 1]
+            assert isinstance(source, deck.Source)
+            expected = [line.strip() for line in block.text.strip().splitlines()]
+            actual = [line.strip() for line in (ROOT / source.path).read_text().splitlines()]
+            assert any(actual[j:j + len(expected)] == expected for j in range(len(actual))), block.caption
+
+
+@pytest.mark.parametrize("decision", ["execute", "reject", "expire"])
+def test_chapter_four_documented_approval_lifecycle_matches_real_api(chapter_four, decision):
+    from datetime import datetime
+    from fastapi.testclient import TestClient
+    from ailab_ops.config import Settings
+    from ailab_ops.runtime import build_runtime
+    from ailab_ops.serving.app import create_app
+    module, _, _ = chapter_four
+    assert hasattr(module, "APPROVAL_OBSERVATIONS"), "approval numbers need reproducible provenance"
+    rt = build_runtime(Settings(model_mode="replay", llm_api_key="", user_qps=0))
+    with TestClient(create_app(rt)) as client:
+        initial = client.post("/v2/investigations", json={"case_id": "case-gpu-assert"}).json()
+        path = "/v2/investigations/" + initial["session_id"]
+        proposal = {**module.ACTION_PROPOSAL, "evidence_ids": initial["evidence_ids"]}
+        request = client.post(path + "/approvals", json={"proposal": proposal}).json()
+        apath = "/v2/approvals/" + request["request_id"]
+        preapproval = client.post(apath + "/execute", json={"actor": "operator"})
+        approved_phase = None
+        result = None
+        replay_equal = None
+        if decision == "execute":
+            approved = client.post(apath + "/approve", json={"actor": "reviewer"})
+            assert approved.status_code == 200
+            approved_phase = client.get(path).json()["phase"]
+            result = client.post(apath + "/execute", json={"actor": "operator"}).json()
+            replay_equal = result == client.post(apath + "/execute", json={"actor": "operator"}).json()
+        elif decision == "reject":
+            assert client.post(apath + "/reject", json={"actor": "reviewer", "reason": "Need input evidence"}).status_code == 200
+        else:
+            service = rt.approval_service(request["request_id"])
+            deadline = datetime.fromisoformat(request["expires_at"])
+            service._now = lambda: deadline
+        final = client.get(path).json()
+        actual = {"initial_phase": initial["phase"], "evidence_count": len(initial["evidence"]),
+                  "pending_status": request["status"], "before_approval_http": preapproval.status_code,
+                  "approved_phase": approved_phase, "final_status": final["approvals"][0]["status"],
+                  "final_phase": final["phase"], "stop_reason": final["stop_reason"],
+                  "result": result, "duplicate_result_equal": replay_equal,
+                  "approval_events": [e["event"] for e in final["timeline"]["events"] if e["kind"] == "approval"]}
+        assert actual == module.APPROVAL_OBSERVATIONS[decision]
+        assert final["report"] == initial["report"]
+        assert rt.record(initial["session_id"]).orchestrator.registry.get("annotate_incident").calls == 0
+
+
+def test_chapter_four_redaction_observation_is_real_presentation_boundary(chapter_four):
+    from ailab_ops.config import Settings
+    from ailab_ops.runtime import build_runtime
+    module, _, _ = chapter_four
+    assert hasattr(module, "REDACTION_OBSERVATION")
+    rt = build_runtime(Settings(model_mode="replay", llm_api_key="", user_qps=0))
+    try:
+        actual = rt.present({"api_key": "demo-key", "reasoning_content": "private notes",
+                             "note": "Authorization: Bearer demo-key", "tokens_used": 1000})
+        assert actual == module.REDACTION_OBSERVATION
+    finally:
+        rt.close()
