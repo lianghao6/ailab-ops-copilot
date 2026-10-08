@@ -18,6 +18,7 @@ from ailab_ops.approvals import ApprovalError, ApprovalRequest, ApprovalService,
 from ailab_ops.evidence import Evidence, EvidenceStore, ValidationIssue, validate_report
 from ailab_ops.llm.base import ChatMessage, FinishReason, ToolCall
 from ailab_ops.models.protocol import ModelBackendError, ModelGateway
+from ailab_ops.observability.events import TraceEvent
 from ailab_ops.policy import PolicyContext, PolicyEngine
 from ailab_ops.tools.registry import ToolRegistry, ToolResult
 
@@ -48,7 +49,8 @@ class InvestigationOrchestrator:
                  evidence_store: EvidenceStore | None = None, *,
                  persist: Callable[[InvestigationState], None] | None = None,
                  now: Callable[[], datetime] | None = None,
-                 approval_store: ApprovalStore | None = None):
+                 approval_store: ApprovalStore | None = None,
+                 event_sink: Callable[[TraceEvent], None] | None = None):
         self.gateway = gateway
         self.registry = registry
         # The legacy injection is an empty, single-use test seam, not historical
@@ -65,8 +67,10 @@ class InvestigationOrchestrator:
         self.states: dict[str, InvestigationState] = {}
         self._evidence_archive: dict[str, dict[str, Evidence]] = {}
         self._persistence_errors: list[dict[str, Any]] = []
+        self._event_sink = event_sink
+        self._tracing_errors: list[dict[str, Any]] = []
         self.policy = PolicyEngine(registry, evidence_lookup=self.get_evidence)
-        self.approval_service = ApprovalService(self.policy, approval_store, now=self._now)
+        self.approval_service = ApprovalService(self.policy, approval_store, now=self._now, event_sink=event_sink)
 
     def start(self, question: str, *, case_id: str | None, budget: Budget) -> InvestigationState:
         """Create and persist intake for callers advancing a session one step at a time."""
@@ -109,14 +113,21 @@ class InvestigationOrchestrator:
         state.phase = InvestigationPhase.INVESTIGATING
         state.budget.steps_used += 1
         self._save(session, "model_requested")
+        self._emit(session, "model", "requested", model=self.gateway.model, retry=session.report_failures)
         try:
             response = self.gateway.complete(deepcopy(session.messages),
                 [self.registry.get(name).spec() for name in self.registry.names
                  if self.registry.get(name).kind == "read"],
                 max_tokens=min(4096, state.budget.max_tokens - state.budget.tokens_used))
         except ModelBackendError as exc:
+            self._emit(session, "error", "model_failed", model=self.gateway.model,
+                       error=exc.kind, payload={"exception_type": type(exc).__name__})
             return self._stop(session, f"model_backend:{exc.kind}")
         state.budget.tokens_used += response.usage.total
+        self._emit(session, "model", "received", model=response.model or self.gateway.model,
+            usage={"tokens_in": response.usage.tokens_in, "tokens_out": response.usage.tokens_out},
+            latency_ms=response.latency_s * 1000, retry=session.report_failures,
+            payload={"finish_reason": response.finish_reason.value})
         self._save(session, "model_received")
         if self._stop_if_exhausted(session, include_steps=False):
             return state
@@ -213,8 +224,27 @@ class InvestigationOrchestrator:
         """Isolated failure records for best-effort state persistence callbacks."""
         return tuple(deepcopy(self._persistence_errors))
 
+    @property
+    def tracing_errors(self) -> tuple[dict[str, Any], ...]:
+        return tuple(deepcopy(self._tracing_errors))
+
+    def _emit(self, session: InvestigationSession, kind: str, event: str, **metadata) -> None:
+        if self._event_sink is None:
+            return
+        try:
+            self._event_sink(TraceEvent(session.state.session_id, kind, session.state.phase.value,
+                event=event, timestamp=self._now().isoformat(), **metadata))
+        except Exception as exc:
+            # No messages, recursive callbacks or transcripts in failure records.
+            self._tracing_errors.append({"session_id": session.state.session_id, "event": event,
+                "phase": session.state.phase.value, "error": type(exc).__name__})
+            session.events.append({"event": "tracing_failed", "error": type(exc).__name__})
+
     def _save(self, session: InvestigationSession, event: str) -> None:
         session.events.append({"event": event, "step": session.state.budget.steps_used})
+        self._emit(session, "state", event, evidence_ids=list(session.state.evidence_ids),
+                   approval_id=session.approval_request_id,
+                   payload={"budget": session.state.budget.to_dict(), "stop_reason": session.state.stop_reason})
         self.states[session.state.session_id] = deepcopy(session.state)
         terminal = session.state.phase in {InvestigationPhase.COMPLETED, InvestigationPhase.STOPPED}
         if terminal:
@@ -254,6 +284,7 @@ class InvestigationOrchestrator:
     def _feedback(self, session: InvestigationSession, error: str, hint: str, **extra: Any) -> None:
         session.messages.append(ChatMessage("user", json.dumps(
             {"error": error, "hint": hint, **extra}, ensure_ascii=False)))
+        self._emit(session, "error", error, error=error, retry=session.report_failures)
         self._save(session, error)
 
     def _tool_feedback(self, session: InvestigationSession, call: ToolCall, payload: dict) -> None:
@@ -266,11 +297,13 @@ class InvestigationOrchestrator:
         try:
             arguments = parse_arguments(call)
             decision = self.policy.authorize(PolicyContext(session.state.session_id), tool, arguments)
+            self._emit(session, "policy", "authorized", tool=call.name, payload={"outcome": decision.outcome})
             if decision.outcome != "allow_read":
                 if tool is not None and tool.kind == "action":
                     raise ControlError("action tools require a proposed_action and approval")
                 raise ControlError(decision.reason)
         except ControlError as exc:
+            self._emit(session, "policy", "denied", tool=call.name, payload={"outcome": "deny"})
             self._tool_feedback(session, call, {"ok": False, "error": str(exc),
                 "hint": "Repair the arguments using the tool schema; actions must be proposed."})
             return
@@ -281,6 +314,8 @@ class InvestigationOrchestrator:
                 "evidence_ids": session.completed_calls[key]})
             return
         result = self.registry.call(call.name, deepcopy(arguments), step=session.state.budget.steps_used)
+        self._emit(session, "tool", "result", tool=call.name, latency_ms=result.latency_ms,
+                   error=None if result.ok else "tool_failed", payload={"ok": result.ok})
         try:
             payload = result.to_dict()
             # Runtime latency is telemetry, not evidence or replay input.
@@ -295,6 +330,7 @@ class InvestigationOrchestrator:
                 session.state.evidence_ids = list(dict.fromkeys(session.state.evidence_ids + ids))
                 session.completed_calls[key] = ids
                 payload["evidence_items"] = [item.to_dict() for item in captured]
+                self._emit(session, "evidence", "captured", tool=call.name, evidence_ids=ids)
         except (ValueError, TypeError, AttributeError):
             payload = {"ok": False, "error": "invalid_evidence_result",
                        "hint": "The tool returned an invalid observation; use another read or retry."}

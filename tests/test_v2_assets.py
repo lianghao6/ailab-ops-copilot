@@ -112,7 +112,8 @@ def test_case_timestamps_and_references_are_consistent(case_id):
 
 
 def test_hidden_labels_are_separate_and_cover_cases():
-    labels = _loader().load_eval_labels(ROOT / "evals" / "labels.jsonl")
+    from ailab_ops.evals import load_eval_labels
+    labels = load_eval_labels(ROOT / "evals" / "labels.jsonl")
     assert sorted(labels) == CASE_IDS
     assert labels["case-gpu-assert"]["root_cause"] == "gpu_device_assert"
     assert labels["case-collective-timeout"]["root_cause"] == "collective_transport_failure"
@@ -122,10 +123,11 @@ def test_hidden_labels_are_separate_and_cover_cases():
 
 
 def test_duplicate_eval_labels_fail_instead_of_silently_overwriting(tmp_path):
+    from ailab_ops.evals import load_eval_labels
     path = tmp_path / "labels.jsonl"
     path.write_text('{"case_id": "case-a"}\n{"case_id": "case-a"}\n')
     with pytest.raises(ValueError, match="Duplicate evaluation case ID: case-a"):
-        _loader().load_eval_labels(path)
+        load_eval_labels(path)
 
 
 def test_insufficient_case_exposes_missing_observations():

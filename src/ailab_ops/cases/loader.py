@@ -1,4 +1,4 @@
-"""Load observable case assets; evaluation labels have a separate entry point.
+"""Load observable case assets only; hidden labels belong to ailab_ops.evals.
 
 The default is the source checkout's data/v2 directory (including editable
 installs). Deployment outside a checkout must supply an explicit data root.
@@ -50,17 +50,3 @@ def load_case(case_id: str, root: Path | None = None) -> CaseWorld:
     if not path.is_file():
         raise FileNotFoundError(f"Case {case_id!r} not found at {path}")
     return CaseWorld(**json.loads(path.read_text(encoding="utf-8")))
-
-
-def load_eval_labels(path: Path) -> dict[str, dict]:
-    """Evaluation-only opt-in reader. Never called by load_case or list_cases."""
-    labels = {}
-    for line in Path(path).read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        row = json.loads(line)
-        case_id = row["case_id"]
-        if case_id in labels:
-            raise ValueError(f"Duplicate evaluation case ID: {case_id}")
-        labels[case_id] = row
-    return labels

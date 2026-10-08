@@ -12,6 +12,7 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from ailab_ops.policy import ApprovalRequest, AuditEvent, PolicyContext, PolicyEngine
+from ailab_ops.observability.events import TraceEvent
 from .store import ApprovalStore
 
 
@@ -30,7 +31,8 @@ class SimulatedActionHandler:
 class ApprovalService:
     def __init__(self, policy: PolicyEngine, store: ApprovalStore | None = None, *,
                  now: Callable[[], datetime] | None = None,
-                 expires_in: timedelta = timedelta(minutes=15)):
+                 expires_in: timedelta = timedelta(minutes=15),
+                 event_sink: Callable[[TraceEvent], None] | None = None):
         if expires_in <= timedelta(0):
             raise ValueError("Approval lifetime must be positive")
         self.policy = policy
@@ -39,6 +41,8 @@ class ApprovalService:
         self._expires_in = expires_in
         self._handlers: dict[str, SimulatedActionHandler] = {}
         self._observers: dict[str, Callable[[ApprovalRequest], None]] = {}
+        self._event_sink = event_sink
+        self._tracing_errors: list[dict[str, Any]] = []
 
     def register_simulated(self, tool_name: str, handler: SimulatedActionHandler) -> None:
         with self.store._lock:
@@ -63,9 +67,28 @@ class ApprovalService:
 
     def _audit(self, event: str, actor: str, request: ApprovalRequest | None = None,
                *, request_id: str | None = None, session_id: str | None = None, **details) -> None:
-        self.store._append(AuditEvent(uuid4().hex,
+        audit = AuditEvent(uuid4().hex,
             request.request_id if request else request_id,
-            request.session_id if request else session_id, event, actor, self._now(), deepcopy(details)))
+            request.session_id if request else session_id, event, actor, self._now(), deepcopy(details))
+        self.store._append(audit)
+        if self._event_sink is not None:
+            try:
+                self._event_sink(TraceEvent(audit.session_id, "approval", request.status if request else None,
+                    event=event, timestamp=audit.occurred_at.isoformat(),
+                    approval_id=audit.request_id, tool=request.tool if request else details.get("tool"),
+                    evidence_ids=list(request.evidence_ids) if request else [],
+                    error=details.get("error"), payload={"actor": actor, **deepcopy(details)}))
+            except Exception as exc:
+                failure = {"session_id": audit.session_id, "approval_id": audit.request_id,
+                           "event": event, "error": type(exc).__name__}
+                self._tracing_errors.append(failure)
+                # Append directly: tracing failure must never invoke its own sink.
+                self.store._append(AuditEvent(uuid4().hex, audit.request_id, audit.session_id,
+                    "tracing_failed", "system", audit.occurred_at, {"event": event, "error": type(exc).__name__}))
+
+    @property
+    def tracing_errors(self) -> tuple[dict[str, Any], ...]:
+        return tuple(deepcopy(self._tracing_errors))
 
     def _save(self, request: ApprovalRequest) -> ApprovalRequest:
         # Commit the lifecycle before best-effort observers. Notification must
