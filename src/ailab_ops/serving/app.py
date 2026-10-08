@@ -105,6 +105,10 @@ def resolve_identity(request: Request, body_tenant: str, body_user: str) -> tupl
 
 
 def create_app(runtime: Runtime | None = None) -> FastAPI:
+    # Legacy APIs are available only with an explicitly supplied V1 runtime.
+    if runtime is None or not isinstance(runtime, Runtime):
+        from .v2 import create_v2_app
+        return create_v2_app(runtime)
     settings = get_settings()
 
     @asynccontextmanager

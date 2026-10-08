@@ -44,6 +44,7 @@ ailab_ops = ["datagen/*.yaml", "serving/static/*.html"]
 "ailab_ops/data/v2/cases" = ["data/v2/cases/*.json"]
 "ailab_ops/data/v2/knowledge/runbooks" = ["data/v2/knowledge/runbooks/*.md"]
 "ailab_ops/data/v2/evals" = ["data/v2/evals/*.jsonl"]
+"ailab_ops/data/v2/replays" = ["data/v2/replays/*.jsonl"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

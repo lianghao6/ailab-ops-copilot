@@ -10,8 +10,8 @@
     ailab-ops compare [--rrf-only]         retrieval comparison across fusion modes
     ailab-ops inspect JOB_ID               dump everything about one job, with ground truth
 
-Every command works offline. `serve` is the only one that opens a port, and
-`bench` is the only one that needs a server already running.
+V2 defaults to online model configuration; `replay` is explicitly offline.
+The old demo/ask/eval/bench commands remain legacy simulation utilities.
 """
 
 from __future__ import annotations
@@ -86,7 +86,7 @@ def cmd_gen_data(args: argparse.Namespace) -> int:
 
 
 def cmd_demo(args: argparse.Namespace) -> int:
-    from .runtime import build_runtime, default_question
+    from .runtime import build_legacy_runtime as build_runtime, default_question
 
     rt = build_runtime()
     job_id = args.job
@@ -169,7 +169,7 @@ def _print_parsed(p: dict) -> None:
 
 
 def cmd_ask(args: argparse.Namespace) -> int:
-    from .runtime import build_runtime
+    from .runtime import build_legacy_runtime as build_runtime
 
     rt = build_runtime()
     result, _ = rt.diagnose(args.question)
@@ -196,17 +196,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
     port = args.port or s.port
     print(
         f"starting AILab Ops Copilot on http://{host}:{port}\n"
-        f"  UI       http://127.0.0.1:{port}/\n"
         f"  OpenAPI  http://127.0.0.1:{port}/docs\n"
-        f"  backend  {s.llm_backend} ({s.llm_model})\n"
-        f"  upstream concurrency {s.upstream_concurrency}, queue {s.queue_maxsize}\n"
-        f"  模型调用模拟耗时 {s.llm_latency_ms:.0f}ms/次"
-        + (
-            "\n  (0ms: fine for the UI, but a benchmark will not see the gate contended — "
-            "use --llm-latency-ms 600)"
-            if s.llm_latency_ms <= 0
-            else ""
-        )
+        f"  model_mode {s.model_mode}\n"
+        f"  upstream concurrency {s.upstream_concurrency}, queue {s.queue_maxsize}"
     )
     uvicorn.run(create_app(), host=host, port=port, log_level=s.log_level.lower())
     return 0
@@ -234,7 +226,7 @@ def cmd_llm_stub(args: argparse.Namespace) -> int:
 
 def cmd_eval(args: argparse.Namespace) -> int:
     from .eval import build_cases, run_eval, write_cases, write_report
-    from .runtime import build_runtime
+    from .runtime import build_legacy_runtime as build_runtime
 
     rt = build_runtime()
     cases = build_cases(
@@ -268,7 +260,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
     from .datagen.taxonomy import load_playbook
     from .rag import build_knowledge_base
     from .signals import extract_log_evidence
-    from .runtime import build_runtime
+    from .runtime import build_legacy_runtime as build_runtime
 
     rt = build_runtime()
     pb = load_playbook()
@@ -386,7 +378,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     diagnosable.
     """
     from .datagen.taxonomy import load_playbook
-    from .runtime import build_runtime
+    from .runtime import build_legacy_runtime as build_runtime
     from .signals import classify_series, extract_log_evidence, score_hypotheses, decide
 
     rt = build_runtime()
@@ -468,12 +460,81 @@ def cmd_inspect(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------
 
 
+def cmd_investigate(args: argparse.Namespace) -> int:
+    import asyncio
+    from dataclasses import replace
+    from .runtime import build_runtime
+
+    settings = get_settings()
+    if args.mode:
+        settings = replace(settings, model_mode=args.mode)
+    rt = build_runtime(settings)
+    try:
+        result = asyncio.run(rt.investigate(case_id=args.case, question=args.question,
+            max_steps=args.max_steps, max_tokens=args.max_tokens, deadline_s=args.deadline_s))
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result["phase"] == "completed" else 2
+    finally:
+        rt.close()
+
+
+def cmd_eval_v2(args: argparse.Namespace) -> int:
+    import asyncio
+    from dataclasses import replace
+    from .cases.loader import list_cases
+    from .evals import EvaluationSample, run_evaluation
+    from .runtime import build_runtime
+
+    settings = get_settings()
+    if args.mode:
+        settings = replace(settings, model_mode=args.mode)
+
+    def factory(case_id):
+        rt = build_runtime(settings)
+        try:
+            result = asyncio.run(rt.investigate(case_id=case_id))
+            record = rt.record(result["session_id"])
+            return EvaluationSample(record.orchestrator.states[result["session_id"]],
+                                    result["evidence"], record.recorder.events)
+        finally:
+            rt.close()
+
+    # Fail configuration before the evaluation runner classifies case failures.
+    probe = build_runtime(settings)
+    probe.close()
+    evaluation = run_evaluation(args.case or list_cases(), args.repeats, factory)
+    result = {"mode": settings.model_mode, "provenance": (
+        "authored replay simulation; not model capability" if settings.model_mode == "replay" else "live model"),
+        **evaluation.to_dict()}
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 2 if any("missing_report" in run.issues or any(issue.startswith("factory_failed") for issue in run.issues)
+                    for run in evaluation.runs) else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="ailab-ops",
         description="AILab Ops Copilot — 面向训练与评测平台的企业级 AIOps Agent，诊断失败 job 的根因。",
     )
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    for command, help_text in [("investigate", "V2 model-directed investigation"),
+                               ("replay", "strict offline authored recording; not a live model")]:
+        inv = sub.add_parser(command, help=help_text)
+        inv.add_argument("--case", required=True)
+        inv.add_argument("--question", default=None)
+        inv.add_argument("--max-steps", type=int, default=None)
+        inv.add_argument("--max-tokens", type=int, default=32768)
+        inv.add_argument("--deadline-s", type=float, default=120)
+        if command == "investigate":
+            inv.add_argument("--mode", choices=["online", "replay"], default=None)
+        inv.set_defaults(fn=cmd_investigate, **({"mode": "replay"} if command == "replay" else {}))
+
+    ev2 = sub.add_parser("eval-v2", help="layered V2 evaluation (replay scores are simulation checks)")
+    ev2.add_argument("--mode", choices=["online", "replay"], default=None)
+    ev2.add_argument("--case", action="append")
+    ev2.add_argument("--repeats", type=int, default=1)
+    ev2.set_defaults(fn=cmd_eval_v2)
 
     g = sub.add_parser("gen-data", help="生成平台数据集")
     g.add_argument("--seed", type=int, default=None)
@@ -490,7 +551,7 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("question", type=str)
     a.set_defaults(fn=cmd_ask)
 
-    s = sub.add_parser("serve", help="start the HTTP API and the demo UI")
+    s = sub.add_parser("serve", help="start the V2 HTTP API")
     s.add_argument("--host", type=str, default=None)
     s.add_argument("--port", type=int, default=None)
     s.add_argument(
@@ -547,6 +608,9 @@ def main(argv: list[str] | None = None) -> int:
     reset_settings()
     try:
         return int(args.fn(args) or 0)
+    except (ValueError, FileNotFoundError) as exc:
+        print(f"configuration/input error: {exc}", file=sys.stderr)
+        return 2
     except KeyboardInterrupt:
         print("\ninterrupted", file=sys.stderr)
         return 130

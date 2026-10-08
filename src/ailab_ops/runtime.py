@@ -59,7 +59,7 @@ class Runtime:
         return agent.run(question, deadline_s=deadline_s, tracer=tracer, max_steps=max_steps), tracer
 
 
-def build_runtime(
+def build_legacy_runtime(
     settings: Settings | None = None,
     data_dir: str | Path | None = None,
     regenerate: bool = False,
@@ -98,6 +98,12 @@ def build_runtime(
     return Runtime(
         settings=s, world=world, registry=registry, llm=llm, kb=kb, boot_ms=boot, source=source
     )
+
+
+def build_runtime(settings: Settings | None = None, *, gateway=None):
+    """Default V2 object graph. Legacy demonstrations opt in explicitly."""
+    from .v2_runtime import InvestigationRuntime
+    return InvestigationRuntime(settings or get_settings(), gateway=gateway)
 
 
 def default_question(world: World) -> tuple[str, str]:

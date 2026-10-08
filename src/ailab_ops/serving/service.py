@@ -1,4 +1,7 @@
-"""The serving layer: sessions, the request pipeline, and the degradation path.
+"""Legacy V1 serving: sessions, the request pipeline, and degradation.
+
+Default V2 serving is in serving/v2.py and v2_runtime.py. Its investigations
+never enter this legacy deterministic evidence-only path.
 
 This module is where the architecture becomes visible as a sequence. A request
 passes through, in order:
@@ -673,6 +676,7 @@ class CopilotService:
         open_breakers = [n for n, s in up_breakers.items() if s["state"] == BreakerState.OPEN]
         return {
             "status": "degraded" if (open_breakers or self.force_degrade) else "ok",
+            "runtime_version": "legacy-v1",
             "force_degrade": self.force_degrade,
             "gate": self.gate.stats().to_dict(),
             "limits": self.limiter.snapshot(),
