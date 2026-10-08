@@ -96,6 +96,17 @@ def test_responsive_layout_and_long_evidence_have_shrink_and_wrap_contracts(asse
         assert not re.fullmatch(r"[1-9]\d*(?:px|rem)", rule.get("min-width", "")), selector
 
 
+def test_wide_desktop_intake_retains_a_readable_page_gutter(assets):
+    _, css = assets
+    # At 1440px the max-width workspace meets the viewport edge; a wide-only
+    # zero gutter would pin headings and form labels to that edge.
+    base = declarations(css, ".intake-column")
+    assert base.get("padding", "").split()[-1] not in {"0", "0px", "0rem"}
+    wide = css.split("@media (min-width: 1400px)", 1)
+    if len(wide) == 2:
+        assert declarations(wide[1], ".intake-column").get("padding-left") not in {"0", "0px", "0rem"}
+
+
 def test_seven_workspace_states_keep_native_controls_and_evidence_targets(browser_payload):
     node = shutil.which("node")
     if not node:
