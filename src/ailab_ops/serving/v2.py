@@ -4,12 +4,13 @@ import asyncio
 import math
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ailab_ops.approvals import ApprovalError
 from ailab_ops.runtime import build_runtime
+from ailab_ops.v2_runtime import TIMELINE_DEFAULT_LIMIT, TIMELINE_MAX_LIMIT
 from .limits import LimitExceeded
 
 
@@ -94,30 +95,41 @@ def create_v2_app(runtime=None):
     async def investigation(session_id: str, request: Request, tenant_id: str = "tenant-01"):
         return request.app.state.rt.get_investigation(session_id, tenant_id)
 
+    @app.get("/v2/investigations/{session_id}/evidence")
+    async def evidence(session_id: str, request: Request, tenant_id: str = "tenant-01"):
+        return request.app.state.rt.get_evidence(session_id, tenant_id)
+
+    @app.get("/v2/investigations/{session_id}/timeline")
+    async def timeline(session_id: str, request: Request, tenant_id: str = "tenant-01",
+                       limit: int = Query(TIMELINE_DEFAULT_LIMIT, ge=1, le=TIMELINE_MAX_LIMIT)):
+        return request.app.state.rt.get_timeline(session_id, tenant_id, limit=limit)
+
+    @app.get("/v2/investigations/{session_id}/approvals")
+    async def approvals(session_id: str, request: Request, tenant_id: str = "tenant-01"):
+        return request.app.state.rt.get_approvals(session_id, tenant_id)
+
     @app.post("/v2/investigations/{session_id}/approvals")
     async def propose(session_id: str, body: ProposalBody, request: Request):
         return request.app.state.rt.request_action(session_id, body.proposal, body.tenant_id)
 
     @app.get("/v2/approvals/{approval_id}")
     async def approval(approval_id: str, request: Request, tenant_id: str = "tenant-01"):
-        service = request.app.state.rt.approval_service(approval_id, tenant_id)
-        service.expire()
-        return service.store.get(approval_id).to_dict()
+        return request.app.state.rt.get_approval(approval_id, tenant_id)
 
     @app.post("/v2/approvals/{approval_id}/approve")
     async def approve(approval_id: str, body: DecisionBody, request: Request):
         service = request.app.state.rt.approval_service(approval_id, body.tenant_id)
-        return service.approve(approval_id, actor=body.actor).to_dict()
+        return request.app.state.rt.present(service.approve(approval_id, actor=body.actor).to_dict())
 
     @app.post("/v2/approvals/{approval_id}/reject")
     async def reject(approval_id: str, body: DecisionBody, request: Request):
         service = request.app.state.rt.approval_service(approval_id, body.tenant_id)
-        return service.reject(approval_id, actor=body.actor, reason=body.reason).to_dict()
+        return request.app.state.rt.present(service.reject(approval_id, actor=body.actor, reason=body.reason).to_dict())
 
     @app.post("/v2/approvals/{approval_id}/execute")
     async def execute(approval_id: str, body: DecisionBody, request: Request):
         service = request.app.state.rt.approval_service(approval_id, body.tenant_id)
-        return service.execute(approval_id, actor=body.actor)
+        return request.app.state.rt.present(service.execute(approval_id, actor=body.actor))
 
     @app.get("/v2/health")
     @app.get("/v1/health")

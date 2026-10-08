@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from threading import Event
+from typing import Any, TypedDict
 from uuid import uuid4
 
 from .approvals import SimulatedActionHandler
@@ -25,6 +26,51 @@ from .serving.cache import BreakerRegistry
 from .serving.gate import GateRejected, UpstreamGate
 from .serving.limits import LimitExceeded, RateLimiter
 from .tools.cases import build_case_registry
+
+
+class EvidencePresentation(TypedDict):
+    session_id: str
+    evidence: list[dict[str, Any]]
+
+
+class ApprovalPresentation(TypedDict):
+    session_id: str
+    approvals: list[dict[str, Any]]
+
+
+class TimelinePresentation(TypedDict):
+    session_id: str
+    trace_id: str
+    events: list[dict[str, Any]]
+    total_events: int
+    returned_events: int
+    truncated: bool
+    limit: int
+
+
+class InvestigationPresentation(TypedDict):
+    session_id: str
+    case_id: str | None
+    question: str
+    mode: str
+    phase: str
+    budget: dict[str, Any]
+    plan: list[str]
+    hypotheses: list[dict[str, Any]]
+    evidence_ids: list[str]
+    report: dict[str, Any] | None
+    stop_reason: str | None
+    trace_id: str
+    evidence: list[dict[str, Any]]
+    approvals: list[dict[str, Any]]
+    approval_state: list[dict[str, Any]]
+    timeline: TimelinePresentation
+    error: dict[str, Any] | None
+    simulated_actions: bool
+
+
+TIMELINE_DEFAULT_LIMIT = 100
+TIMELINE_MAX_LIMIT = 500
 
 
 class GuardedGateway:
@@ -96,6 +142,16 @@ class InvestigationRuntime:
                                                 thread_name_prefix="v2-model")
         self.records: dict[str, InvestigationRecord] = {}
         self.approval_owners: dict[str, str] = {}
+        # State/evidence/approval snapshots are not telemetry and may contain
+        # user-provided strings. Apply the same credential redaction everywhere,
+        # including the key of an explicitly injected online gateway.
+        self._presentation_redactor = TraceRecorder(
+            secrets=[settings.llm_api_key, getattr(self.gateway, "api_key", "")],
+            sensitive_fields={"hidden_labels", "evaluation_labels", "labels", "ground_truth",
+                "expected_root_cause", "expected_status", "expected_findings", "expected_actions",
+                "expected_missing_evidence", "private_reasoning", "reasoning", "reasoning_content",
+                "reasoning_details", "thinking", "thinking_content", "chain_of_thought",
+                "raw_model_response", "messages"})
 
     async def _advance(self, record, state, gateway, cancelled):
         orchestrator, tenant_id = record.orchestrator, record.tenant_id
@@ -195,30 +251,82 @@ class InvestigationRuntime:
             raise KeyError("Unknown investigation")
         return record
 
-    def get_investigation(self, session_id, tenant_id="tenant-01"):
+    def present(self, value: Any) -> Any:
+        """Return an independent, recursively redacted JSON presentation copy."""
+        return self._presentation_redactor.redact(value)
+
+    def get_evidence(self, session_id: str, tenant_id: str = "tenant-01") -> EvidencePresentation:
+        record = self.record(session_id, tenant_id)
+        state = record.orchestrator.states[session_id]
+        return {"session_id": session_id, "evidence": self.present([
+            record.orchestrator.get_evidence(session_id, eid).to_dict() for eid in state.evidence_ids])}
+
+    def get_timeline(self, session_id: str, tenant_id: str = "tenant-01", *,
+                     limit: int = TIMELINE_DEFAULT_LIMIT) -> TimelinePresentation:
+        record = self.record(session_id, tenant_id)
+        if not 1 <= limit <= TIMELINE_MAX_LIMIT:
+            raise ValueError("Timeline limit must be between 1 and 500")
+        # Recorder events are redacted copies; filter again by session so a
+        # shared sink cannot disclose another investigation's telemetry.
+        events = [event for event in record.recorder.events if event.session_id == session_id]
+        selected = events[-limit:]
+        return {"session_id": session_id, "trace_id": record.trace_id,
+            "events": self.present([event.to_dict() for event in selected]),
+            "total_events": len(events), "returned_events": len(selected),
+            "truncated": len(events) > limit, "limit": limit}
+
+    def get_approvals(self, session_id: str, tenant_id: str = "tenant-01") -> ApprovalPresentation:
+        service = self.record(session_id, tenant_id).orchestrator.approval_service
+        service.expire()
+        requests = [request.to_dict() for request in service.store.requests if request.session_id == session_id]
+        return {"session_id": session_id, "approvals": self.present(requests)}
+
+    def get_approval(self, approval_id: str, tenant_id: str = "tenant-01") -> dict[str, Any]:
+        service = self.approval_service(approval_id, tenant_id)
+        service.expire()
+        return self.present(service.store.get(approval_id).to_dict())
+
+    def get_investigation(self, session_id: str, tenant_id: str = "tenant-01") -> InvestigationPresentation:
         record = self.record(session_id, tenant_id)
         orchestrator = record.orchestrator
         orchestrator.approval_service.expire()
         state = orchestrator.states[session_id]
         result = state.to_dict()
+        approvals = self.get_approvals(session_id, tenant_id)["approvals"]
         result.update(trace_id=record.trace_id,
-            evidence=[orchestrator.get_evidence(session_id, eid).to_dict() for eid in state.evidence_ids],
-            approval_state=[request.to_dict() for request in orchestrator.approval_service.store.requests],
+            evidence=self.get_evidence(session_id, tenant_id)["evidence"],
+            approvals=approvals, approval_state=approvals,
+            timeline=self.get_timeline(session_id, tenant_id),
             error=None, simulated_actions=True)
         if record.error:
             error = record.error
             result["error"] = {"kind": error.kind, "retryable": error.retryable,
                                "retry_after_s": error.retry_after_s}
-        return result
+        return self.present(result)
 
     def request_action(self, session_id, proposal, tenant_id="tenant-01"):
         request = self.record(session_id, tenant_id).orchestrator.request_action(session_id, proposal)
         self.approval_owners[request.request_id] = session_id
-        return request.to_dict()
+        return self.present(request.to_dict())
 
     def approval_service(self, approval_id, tenant_id="tenant-01"):
-        session_id = self.approval_owners[approval_id]
-        return self.record(session_id, tenant_id).orchestrator.approval_service
+        session_id = self.approval_owners.get(approval_id)
+        if session_id is not None:
+            service = self.record(session_id, tenant_id).orchestrator.approval_service
+            if service.store.get(approval_id).session_id == session_id:
+                return service
+        # The orchestrator can propose actions during model control processing,
+        # without going through request_action(). Discover only this tenant's
+        # owned requests; never trust an approval ID alone as authorization.
+        for owned_session, record in tuple(self.records.items()):
+            if record.tenant_id != tenant_id:
+                continue
+            service = record.orchestrator.approval_service
+            for request in service.store.requests:
+                if request.request_id == approval_id and request.session_id == owned_session:
+                    self.approval_owners[approval_id] = owned_session
+                    return service
+        raise KeyError("Unknown approval")
 
     def health(self):
         breakers = self.breakers.snapshot()
