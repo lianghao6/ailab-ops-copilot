@@ -139,3 +139,18 @@ def test_embedded_credentials_never_reach_memory_or_jsonl(message, secrets, tmp_
         assert secret not in path.read_text()
     assert recorder.events[0].usage == {"tokens_in": 11, "tokens_out": 7}
     assert recorder.events[0].payload["normal"] == "Worker lost heartbeat; retry in 5 seconds"
+
+
+def test_quoted_cookie_with_multiple_fields_is_removed_without_swallowing_next_line(tmp_path):
+    from ailab_ops.observability import TraceEvent, TraceRecorder
+    recorder = TraceRecorder()
+    recorder.record(TraceEvent("s1", "error", payload={"error":
+        'Cookie: session="FAKE-QUOTED-COOKIE"; csrf=FAKE-CSRF-ONLY; other="FAKE-THIRD-COOKIE"\n'
+        'Worker stopped; retry in 5 seconds'}))
+    path = tmp_path / "quoted-cookie.jsonl"
+    recorder.write_jsonl(path)
+    for text in [json.dumps(recorder.events[0].to_dict()), path.read_text()]:
+        for secret in ["FAKE-QUOTED-COOKIE", "FAKE-CSRF-ONLY", "FAKE-THIRD-COOKIE"]:
+            assert secret not in text
+        assert "Worker stopped; retry in 5 seconds" in text
+    assert recorder.events[0].payload["error"] == 'Cookie=[REDACTED]\nWorker stopped; retry in 5 seconds'

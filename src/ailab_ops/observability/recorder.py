@@ -25,10 +25,10 @@ class TraceRecorder:
                          for key in fields)
         self._credential_text = re.compile(
             rf"(?i)\b([a-z0-9_-]*(?:{names}))[\"']?\s*[:=]\s*(?:\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s,;\"']+)")
-        # Headers can contain several whitespace/semicolon-separated secrets.
-        # Clean their entire value before the narrower generic key/value rule.
+        # Quoted cookies can contain arbitrary separators and more cookie fields.
+        # Remove the full header line; only CR/LF or end-of-string is a boundary.
         self._header_text = re.compile(
-            r"(?i)\b(authorization|cookie)[\"']?\s*[:=]\s*(?:\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\r\n,\"'}]+)")
+            r"(?i)\b(authorization|cookie)[\"']?\s*[:=][^\r\n]*")
         self._secrets = tuple(sorted({secret for secret in secrets if secret}, key=len, reverse=True))
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._events: list[TraceEvent] = []
