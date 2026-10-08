@@ -142,6 +142,41 @@ def test_gate_drains_completely():
     asyncio.run(body())
 
 
+def test_gate_release_skips_cancelled_head_before_its_cleanup_resumes():
+    async def body():
+        gate = UpstreamGate(max_concurrency=1, queue_maxsize=2, queue_timeout_s=1)
+        await gate.acquire()
+        cancelled = asyncio.create_task(gate.acquire(Priority.INTERACTIVE))
+        following = asyncio.create_task(gate.acquire(Priority.NORMAL))
+        try:
+            while gate.queued < 2:
+                await asyncio.sleep(0)
+            cancelled.cancel()
+            # Reverse the prior regression's ordering: release must skip this
+            # cancelled Future before acquire() gets to remove its heap item.
+            await gate.release()
+            with pytest.raises(asyncio.CancelledError):
+                await cancelled
+            await asyncio.wait_for(following, timeout=0.1)
+            assert gate.in_flight == 1 and gate.queued == 0
+            assert gate.stats().admitted == 2
+            assert gate.stats().rejected_timeout == 0
+            await gate.release()
+            assert gate.in_flight == 0
+            # Neither cancelled-waiter cleanup nor handoff inflated capacity.
+            await gate.acquire()
+            with pytest.raises(GateRejected):
+                await gate.acquire(timeout_s=0.01)
+            await gate.release()
+            assert gate.in_flight == gate.queued == 0
+        finally:
+            for task in (cancelled, following):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(cancelled, following, return_exceptions=True)
+    asyncio.run(body())
+
+
 def test_reconfigure_refuses_while_busy():
     async def body():
         gate = UpstreamGate(max_concurrency=2)

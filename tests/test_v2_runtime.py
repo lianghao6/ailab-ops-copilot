@@ -322,3 +322,49 @@ def test_cancelled_gate_handoff_returns_slot_to_next_waiter():
         await gate.release()
         assert gate.in_flight == 0
     asyncio.run(scenario())
+
+
+def test_runtime_release_before_cancelled_waiter_cleanup_does_not_strand_successor(monkeypatch):
+    gateway = BlockingSuccessfulGateway()
+    rt = build_runtime(replay_settings(upstream_concurrency=1, queue_maxsize=2, queue_timeout_s=0.1), gateway=gateway)
+
+    async def scenario():
+        first = asyncio.create_task(rt.investigate(case_id="case-gpu-assert", tenant_id="first", max_steps=1))
+        await eventually(gateway.started.is_set)
+        cancelled = asyncio.create_task(rt.investigate(case_id="case-gpu-assert", tenant_id="cancelled", max_steps=1))
+        await eventually(lambda: rt.gate.queued == 1)
+        following = asyncio.create_task(rt.investigate(case_id="case-gpu-assert", tenant_id="following", max_steps=1))
+        original_release = rt.gate.release
+        cancellation_injected = False
+
+        async def cancel_then_release():
+            nonlocal cancellation_injected
+            if not cancellation_injected:
+                cancellation_injected = True
+                cancelled.cancel()
+            await original_release()
+
+        try:
+            await eventually(lambda: rt.gate.queued == 2)
+            # Inject cancellation exactly at the real runtime's release edge;
+            # both the model accounting and the gate handoff stay real.
+            monkeypatch.setattr(rt.gate, "release", cancel_then_release)
+            gateway.release.set()
+            initial, stopped, successor = await asyncio.gather(first, cancelled, following, return_exceptions=True)
+            assert isinstance(stopped, asyncio.CancelledError)
+            assert initial["error"] is None
+            assert successor["error"] is None
+            assert successor["budget"]["tokens_used"] == 17
+            assert gateway.calls == 2
+            assert rt.gate.in_flight == rt.gate.queued == 0
+            assert rt.gate.stats().admitted == 2 and rt.gate.stats().rejected_timeout == 0
+            assert all(tenant["in_flight"] == 0 for tenant in rt.limiter.snapshot()["tenants"].values())
+            cancelled_id = next(sid for sid, record in rt.records.items() if record.tenant_id == "cancelled")
+            assert rt.get_investigation(cancelled_id, "cancelled")["stop_reason"] == "cancelled"
+        finally:
+            gateway.release.set()
+            await asyncio.gather(first, cancelled, following, return_exceptions=True)
+    try:
+        asyncio.run(scenario())
+    finally:
+        rt.close()

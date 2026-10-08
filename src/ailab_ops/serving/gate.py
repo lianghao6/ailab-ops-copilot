@@ -189,7 +189,10 @@ class UpstreamGate:
         """Release a slot and hand it to the longest-waiting suitable waiter."""
         self._in_flight -= 1
         async with self._lock:
-            if self._heap:
+            # Cancellation/timeout may finish a Future before its acquire()
+            # coroutine resumes to clean up. Drain those dead entries without
+            # exposing capacity or bypassing the next priority-ordered waiter.
+            while self._heap:
                 waiter = heapq.heappop(self._heap)
                 if not waiter.future.done():
                     waiter.future.set_result(True)
