@@ -8,7 +8,7 @@
 }
 * { box-sizing: border-box; }
 html { scroll-behavior: smooth; scroll-padding-top: 1.5rem; }
-body { margin: 0; color: var(--ink); background: var(--paper); font: 15px/1.7 var(--sans); }
+body { margin: 0; color: var(--ink); background: var(--paper); font: 15px/1.7 var(--sans); overflow-wrap: anywhere; }
 a { color: var(--accent); text-underline-offset: .2em; }
 button, input, textarea, select { font: inherit; }
 button, a, input, textarea, select, summary { -webkit-tap-highlight-color: transparent; }

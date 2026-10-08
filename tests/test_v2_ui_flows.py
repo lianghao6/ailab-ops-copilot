@@ -47,12 +47,13 @@ const tick = () => new Promise(setImmediate);
 const reply = (value, status=200) => ({ok: status < 400, status, json: async () => value});
 let saved;
 const calls = [];
-let transport = async () => reply({model_mode: input.scenario === "online" ? "online" : "replay"});
+let transport = async path => reply(path === "/v2/health" ? {model_mode: input.scenario === "online" ? "online" : "replay"}
+  : path.includes("timeline") ? input.approved.timeline : input.approved);
 global.fetch = async (path, options={}) => { calls.push({path, options}); return transport(path, options); };
 global.document = {getElementById: id => elements[id], createElement: tag => new Element(tag), dispatchEvent() {}};
 global.window = {};
 global.CustomEvent = class { constructor(type, options) { this.type = type; this.detail = options.detail; } };
-global.localStorage = {getItem: () => null, setItem: (_, value) => { saved = JSON.parse(value); }};
+global.localStorage = {getItem: () => input.scenario === "reload" ? JSON.stringify({tenantId:"tenant-01",sessionId:input.approved.session_id}) : null, setItem: (_, value) => { saved = JSON.parse(value); }};
 let timers = new Map(); let timerId = 0;
 global.setTimeout = fn => { timers.set(++timerId, fn); return timerId; };
 global.clearTimeout = id => timers.delete(id);
@@ -74,7 +75,41 @@ const watchdog = require("timers").setTimeout(() => { process.stderr.write("Flow
     elements["proposal-evidence"].value = input.detail.evidence_ids.join(", ");
   };
   const start = async () => { transport = async () => reply(input.detail); await submit("intake-form"); };
-  if (["replay", "online"].includes(input.scenario)) {
+  if (input.scenario === "accessible_states") {
+    const snapshots = [null, {...input.detail, phase:"investigating", report:null}, input.detail, input.insufficient, input.pending, input.rejected, input.executed];
+    for (const snapshot of snapshots) {
+      ws.render(snapshot);
+      if (snapshot) {
+        const phase = find(elements["phase-rail"], e => e.attrs["aria-current"] === "step");
+        assert.strictEqual(phase.dataset.phase, snapshot.phase);
+        for (const evidence of snapshot.evidence) assert(elements["evidence-list"].textContent.includes(evidence.excerpt));
+        if (snapshot.report) assert(elements["report-content"].textContent.includes(snapshot.report.summary));
+      } else {
+        assert.strictEqual(elements["action-controls"].hidden, true);
+        assert(elements["report-content"].textContent.includes("尚未形成"));
+      }
+      const all = [];
+      const walk = e => { all.push(e); for (const child of e.children) walk(child); };
+      for (const id of ["evidence-list", "hypothesis-list", "report-content", "timeline-list", "approval-list", "approval-audit"]) walk(elements[id]);
+      for (const e of all) {
+        if (e.tag === "details") assert(e.children[0].tag === "summary" && e.children[0].textContent, "disclosures must have native named summaries");
+        if (e.tag === "button") assert(e.type === "button" && e.textContent, "decisions must be named native buttons");
+        if (e.dataset.confirm) assert(all.some(label => label.tag === "label" && label.children.includes(e) && label.textContent), "checkbox must be wrapped in a named label");
+        if (e.dataset.reason) assert(all.some(label => label.tag === "label" && label.attrs.for === e.id && label.textContent), "reason input must have a linked label");
+        if (e.className === "citation") assert(all.some(target => target.className === "evidence-card" && "#" + target.id === e.href), "citations must reach displayed evidence");
+      }
+      if (snapshot === input.insufficient) {
+        assert(snapshot.report.unknowns.length > 0);
+        for (const unknown of snapshot.report.unknowns) assert(elements["report-content"].textContent.includes(unknown));
+      }
+      if (snapshot === input.rejected) assert.strictEqual(action("execute"), undefined);
+      if (snapshot === input.executed) assert(elements["approval-list"].textContent.includes("模拟执行结果"));
+    }
+    ws.status("loading", "调查中");
+    assert.strictEqual(elements.investigation.attrs["aria-busy"], "true");
+    ws.status("ready", "可审阅");
+    assert.strictEqual(elements.investigation.attrs["aria-busy"], "false");
+  } else if (["replay", "online"].includes(input.scenario)) {
     elements["tenant-id"].value = " tenant&next ";
     elements["question"].value = "  custom question  ";
     elements["case-input"].value = " case-gpu-assert ";
@@ -191,14 +226,51 @@ const watchdog = require("timers").setTimeout(() => { process.stderr.write("Flow
     elements["tenant-id"].value="   "; calls.length=0;
     await action("approve").handlers.click();
     assert.strictEqual(calls.length,0); assert.strictEqual(ws.state.detail,null);
-  } else if (input.scenario === "mutation_refresh_error") {
+  } else if (input.scenario === "expiry_in_place") {
+    for (const snapshot of [input.pending, input.approved]) {
+      Date.now = () => Date.parse(snapshot.approvals[0].created_at) + 1000;
+      ws.render(snapshot);
+      const decision = snapshot.approvals[0].status === "pending" ? "approve" : "execute";
+      assert.strictEqual(action(decision).attrs["aria-describedby"], undefined, "available action must not announce a hidden expired explanation");
+      const checkbox = find(elements["approval-list"], e => e.dataset.confirm === decision);
+      checkbox.checked = true;
+      const editing = find(elements["approval-list"], e => e.dataset.reason === "reject");
+      if (editing) editing.value = "review in progress";
+      Date.now = () => Date.parse(snapshot.approvals[0].expires_at);
+      ws.render(snapshot);
+      assert.strictEqual(action(decision).disabled, true);
+      const note = find(elements["approval-list"], e => e.dataset.expiryNote === "true");
+      assert(note && !note.hidden && note.textContent.includes("到期"), "in-place expiry must explain disabled controls nearby");
+      assert.strictEqual(action(decision).attrs["aria-describedby"], note.id);
+      assert.strictEqual(find(elements["approval-list"], e => e.dataset.confirm === decision), checkbox);
+      assert.strictEqual(checkbox.checked, true);
+      if (editing) {
+        assert.strictEqual(find(elements["approval-list"], e => e.dataset.reason === "reject"), editing);
+        assert.strictEqual(editing.value, "review in progress");
+      }
+      assert.strictEqual(ws.state.detail.approvals[0].status, snapshot.approvals[0].status);
+    }
+  } else if (input.scenario === "reload") {
+    await tick();
+    assert.strictEqual(ws.state.detail.approvals[0].status, "approved");
+    assert(calls.every(c => !c.options.method || c.options.method === "GET"), "reload must only read server state");
+    assert(calls.some(c => c.path.includes("/timeline?")));
+    assert.strictEqual(find(elements["approval-list"], e => e.dataset.confirm === "execute").checked, false);
+    assert.strictEqual(elements["action-actor"].value, "");
+  } else if (["mutation_refresh_error", "post_transport_exception"].includes(input.scenario)) {
     ws.render(input.pending); elements["action-actor"].value="reviewer";
     find(elements["approval-list"], e => e.dataset.confirm === "approve").checked=true;
-    transport = async (path, options) => options.method === "POST" ? reply(input.approved.approvals[0]) : reply({error:{kind:"upstream",retryable:true}},503);
+    transport = async (path, options) => {
+      if (options.method === "POST" && input.scenario === "post_transport_exception") throw new TypeError("connection reset after write");
+      return options.method === "POST" ? reply(input.approved.approvals[0]) : reply({error:{kind:"upstream",retryable:true}},503);
+    };
     await action("approve").handlers.click();
     assert.strictEqual(ws.state.detail.approvals[0].status,"pending");
     assert.strictEqual(action("approve").disabled,true,"uncertain mutation must require refresh before more writes");
     assert(elements["workspace-status"].textContent.includes("刷新"));
+    const count = calls.length;
+    await action("approve").handlers.click();
+    assert.strictEqual(calls.length, count, "uncertain mutation must block repeated writes");
     transport = async path => reply(path.includes("timeline") ? input.approved.timeline : input.approved);
     await ws.refreshSession();
     assert.strictEqual(ws.state.detail.approvals[0].status,"approved");
@@ -281,12 +353,14 @@ def browser_payload():
         reject_pending = client.get("/v2/investigations/" + other["session_id"]).json()
         client.post("/v2/approvals/" + rejected_action["request_id"] + "/reject", json={"actor": "reviewer", "reason": "Unsafe evidence"})
         rejected = client.get("/v2/investigations/" + other["session_id"]).json()
+        insufficient_response = client.post("/v2/investigations", json={"case_id": "case-insufficient-evidence"})
+        assert insufficient_response.status_code == 200
         return {"detail": detail, "proposal": action, "pending": pending, "approved": approved,
-                "executed": executed, "reject_pending": reject_pending, "rejected": rejected, "elements": Document(client.get("/").text).elements,
+                "executed": executed, "reject_pending": reject_pending, "rejected": rejected, "insufficient": insufficient_response.json(), "elements": Document(client.get("/").text).elements,
                 "script": str(Path(__file__).resolve().parents[1] / "src/ailab_ops/serving/static/v2/app.js")}
 
 
-@pytest.mark.parametrize("scenario", ["replay", "online", "errors", "duplicate_cancel_stale", "poll", "proposal", "decisions", "reject_expiry_identity", "mutation_refresh_error", "refresh_preserves_review", "stale_followup", "mutation_duplicate_abort", "nonretry_poll_error", "start_action_audit", "tenant_drafts"])
+@pytest.mark.parametrize("scenario", ["replay", "online", "errors", "duplicate_cancel_stale", "poll", "proposal", "decisions", "reject_expiry_identity", "mutation_refresh_error", "refresh_preserves_review", "stale_followup", "mutation_duplicate_abort", "nonretry_poll_error", "start_action_audit", "tenant_drafts", "expiry_in_place", "reload", "post_transport_exception"])
 def test_browser_flow(browser_payload, scenario):
     node = shutil.which("node")
     if not node:

@@ -252,13 +252,18 @@
         && snapshots.every((snapshot, index) => board.children[index].dataset.snapshot === snapshot)) {
       // Keep the actual input nodes during polling so keyboard focus and draft
       // rejection reasons survive. Only the server may change request status.
-      function expiryControls(element, unavailable) {
-        if (element.dataset.action) element.dataset.unavailable = String(unavailable);
-        for (const child of element.children) expiryControls(child, unavailable);
+      function expiryControls(element, unavailable, noteId) {
+        if (element.dataset.action) {
+          element.dataset.unavailable = String(unavailable);
+          if (unavailable) element.setAttribute("aria-describedby", noteId);
+          else element.removeAttribute("aria-describedby");
+        }
+        if (element.dataset.expiryNote) element.hidden = !unavailable;
+        for (const child of element.children) expiryControls(child, unavailable, noteId);
       }
       approvals.forEach((approval, index) => {
         const deadline = Date.parse(approval.expires_at);
-        expiryControls(board.children[index], !Number.isFinite(deadline) || Date.now() >= deadline);
+        expiryControls(board.children[index], !Number.isFinite(deadline) || Date.now() >= deadline, `expiry-${approval.request_id}`);
       });
       return;
     }
@@ -292,10 +297,14 @@
       if (approval.result) article.append(details("模拟执行结果 / SIMULATION", approval.result));
       const deadline = Date.parse(approval.expires_at);
       const unavailable = !Number.isFinite(deadline) || Date.now() >= deadline;
-      if (unavailable && ["pending", "approved"].includes(approval.status)) {
-        article.append(node("p", "到期时间已过或无法核验。请刷新服务端状态；当前显示保留服务端最后确认的状态。", "field-note"));
-      }
       if (["pending", "approved"].includes(approval.status)) {
+        const expiryNote = node("p", "到期时间已过或无法核验。请刷新服务端状态；当前显示保留服务端最后确认的状态。", "field-note");
+        expiryNote.id = `expiry-${approval.request_id}`;
+        expiryNote.dataset.expiryNote = "true";
+        expiryNote.hidden = !unavailable;
+        expiryNote.setAttribute("role", "status");
+        expiryNote.setAttribute("aria-live", "polite");
+        article.append(expiryNote);
         const controls = node("div", null, "decision-controls");
         const decision = approval.status === "pending" ? "approve" : "execute";
         const checkbox = node("input");
@@ -310,6 +319,7 @@
         button.type = "button";
         button.dataset.action = decision;
         button.dataset.unavailable = String(unavailable);
+        if (unavailable) button.setAttribute("aria-describedby", expiryNote.id);
         button.addEventListener("click", () => decideApproval(approval.request_id, decision, { confirmed: checkbox.checked }));
         controls.append(label, button);
         if (approval.status === "pending") {
@@ -323,6 +333,7 @@
           reject.type = "button";
           reject.dataset.action = "reject";
           reject.dataset.unavailable = String(unavailable);
+          if (unavailable) reject.setAttribute("aria-describedby", expiryNote.id);
           reject.addEventListener("click", () => decideApproval(approval.request_id, "reject", { reason: reason.value }));
           controls.append(reasonLabel, reason, reject);
         }
