@@ -18,7 +18,7 @@ import pytest
 from ailab_ops.config import reset_settings
 from ailab_ops.datagen import generate_world, load_playbook
 from ailab_ops.rag import build_knowledge_base
-from ailab_ops.runtime import Runtime
+from ailab_ops.legacy.runtime import Runtime
 from ailab_ops.tools import build_registry
 
 
@@ -48,8 +48,8 @@ def registry(world):
 
 @pytest.fixture(scope="session")
 def runtime(tmp_path_factory, world) -> Runtime:
-    """A Runtime wired to the session world, bypassing disk I/O where possible."""
-    from ailab_ops.llm import build_llm_client
+    """Explicit legacy Runtime for preserved generated-world regression tests."""
+    from ailab_ops.llm.registry import build_legacy_llm_client
 
     kb_ = build_knowledge_base(world.playbook)
     reg = build_registry(world, kb_.retriever, simulated_latency_ms={k: 0.0 for k in
@@ -61,7 +61,7 @@ def runtime(tmp_path_factory, world) -> Runtime:
         settings=get_settings(),
         world=world,
         registry=reg,
-        llm=build_llm_client(get_settings()),
+        llm=build_legacy_llm_client(get_settings()),
         kb=kb_,
         boot_ms=0.0,
         source="test",

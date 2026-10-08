@@ -1,29 +1,9 @@
-"""A deterministic, offline "reasoner".
+"""Unsupported V1 deterministic playbook simulator.
 
-This is not a stub. It is a genuine implementation of `LLMClient` that performs
-the same work a real model would have to perform, using the same evidence
-delivered through the same tool interface:
-
-    1. plan   -> decide which tool to call next, given what has been learned
-    2. read   -> extract evidence from the tool results
-    3. reason -> score competing hypotheses and decide, including refusing
-    4. answer -> emit a structured diagnosis with evidence and citations
-
-Why build it this way rather than hard-coding "if log contains X then answer Y":
-
-* the project must run offline, deterministically and for free, in a room of
-  and must produce identical output for identical input so an
-  evaluation number means something;
-* the reasoning path is visible and inspectable, so a class can argue with it
-  and then change a threshold and watch the evaluation move;
-* because it goes through the real tool interface, swapping in a served model
-  exercises the identical plumbing -- the only thing that changes is who does
-  the reasoning.
-
-The interesting consequence: the mock's accuracy *is* a real ceiling for the
-architecture. Anything the mock gets wrong because the evidence never reached
-it is a plumbing bug, not a model failure, and the evaluation report separates
-those two cases.
+Kept for explicit legacy commands, the legacy HTTP stub and regression tests.
+It uses the same authored fault signatures as the V1 telemetry generator;
+its diagnosis scores do not establish model capability or generalization.
+V2 never loads this module. See docs/legacy-v1.md for the historical version.
 """
 
 from __future__ import annotations

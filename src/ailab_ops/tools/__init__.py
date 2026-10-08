@@ -5,14 +5,15 @@
 窗口耗在某个 40MB 的日志上。
 """
 
-from .builtin import (
-    MAX_JOBS,
-    MAX_LOG_LINES,
-    MAX_METRICS,
-    MAX_SERIES_POINTS,
-    build_registry,
-)
 from .registry import Tool, ToolRegistry, ToolResult
+
+
+def __getattr__(name):
+    # Historical generated-world tools are loaded only by explicit consumers.
+    if name in {"MAX_JOBS", "MAX_LOG_LINES", "MAX_METRICS", "MAX_SERIES_POINTS", "build_registry"}:
+        from . import builtin
+        return getattr(builtin, name)
+    raise AttributeError(name)
 
 __all__ = [
     "MAX_JOBS",

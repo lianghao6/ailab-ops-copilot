@@ -508,9 +508,8 @@ def test_tenant_token_window_rolls():
 # --------------------------------------------------------------------------
 
 
-def test_full_pipeline_answers_a_real_job(runtime, world):
-    """The claim the whole project rests on: given a failed job, the assembled
-    system produces a structured diagnosis through the real tool interface."""
+def test_legacy_pipeline_answers_a_generated_job(runtime, world):
+    """Preserve the V1 simulation's structured result and tool-interface contract."""
     job = next(j for j in world.failed_jobs() if not j.is_insufficient_evidence)
     res, tracer = runtime.diagnose(
         f"Why did {job.job_id} ({job.name}) fail? Give me the root cause and remediation."
@@ -523,10 +522,8 @@ def test_full_pipeline_answers_a_real_job(runtime, world):
     assert tracer.trace.spans, "the run produced no trace"
 
 
-def test_pipeline_accuracy_on_a_sample(runtime, world):
-    """A floor, not a target. The mock reasoner is the architecture's ceiling:
-    anything it gets wrong because the evidence never arrived is a plumbing bug,
-    and this test is what turns that from an argument into a number."""
+def test_legacy_pipeline_matches_the_shared_playbook_on_a_sample(runtime, world):
+    """Regression floor for authored V1 rules, not model capability or an architecture ceiling."""
     from ailab_ops.llm.mock import MockLLMClient
 
     jobs = [j for j in world.failed_jobs()][:60]

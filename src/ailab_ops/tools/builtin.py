@@ -352,7 +352,7 @@ def build_registry(
     # ---- search_runbooks ----------------------------------------------
     def search_runbooks(query: str, top_k: int = 4, category: str | None = None) -> ToolResult:
         if retriever is None:
-            return ToolResult(ok=False, error="knowledge base unavailable", hint="run `make data` to build it")
+            return ToolResult(ok=False, error="knowledge base unavailable", hint="run `make legacy-data` for the V1 simulation")
         tags = (category,) if category else None
         res = retriever.search(query, top_k=min(top_k, 6), tag_filter=tags)
         return ToolResult(ok=True, data=res.to_dict())

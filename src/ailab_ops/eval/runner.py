@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from ..agent import AgentResult
 from ..datagen.taxonomy import INSUFFICIENT_EVIDENCE
-from ..runtime import Runtime
+from ..legacy.runtime import Runtime
 from .models import CaseResult
 from .models import EvalReport
 from .models import HIGH_CONFIDENCE

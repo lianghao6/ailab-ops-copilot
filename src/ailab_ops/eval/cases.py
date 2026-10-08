@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from ..runtime import Runtime
+from ..legacy.runtime import Runtime
 from collections import defaultdict
 from typing import Any
 import random

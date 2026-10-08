@@ -12,14 +12,15 @@ from .cache import (
 )
 from .gate import GateRejected, Priority, UpstreamGate
 from .limits import LimitExceeded, RateLimiter, SlidingWindow, TokenBucket
-from .service import (
-    CopilotService,
-    DiagnosisRequest,
-    DiagnosisResponse,
-    ServiceError,
-    SessionStore,
-    evidence_only_answer,
-)
+
+
+def __getattr__(name):
+    # Compatibility consumers opt into the unsupported V1 service explicitly.
+    if name in {"CopilotService", "DiagnosisRequest", "DiagnosisResponse", "ServiceError",
+                "SessionStore", "evidence_only_answer"}:
+        from . import service
+        return getattr(service, name)
+    raise AttributeError(name)
 
 __all__ = [
     "BreakerRegistry",

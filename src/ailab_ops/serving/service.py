@@ -43,7 +43,7 @@ from ..config import Settings, get_settings
 from ..datagen.taxonomy import INSUFFICIENT_EVIDENCE
 from ..llm.base import ChatMessage, approx_tokens
 from ..obs import METRICS, Metrics, Tracer
-from ..runtime import Runtime
+from ..legacy.runtime import Runtime
 from ..signals import decide, extract_log_evidence, score_hypotheses
 from .cache import (
     BreakerState,

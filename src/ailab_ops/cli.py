@@ -1,17 +1,6 @@
-"""Command-line entry point.
+"""V2 CLI: online requires a model/key; replay reads strict authored recordings.
 
-    ailab-ops gen-data [--seed N] [--jobs N] [--out DIR]
-    ailab-ops demo [--job JOB_ID] [--json]
-    ailab-ops ask "question"
-    ailab-ops serve [--host H] [--port P]
-    ailab-ops llm-stub [--port P] [--fail-rate F]
-    ailab-ops eval [--limit N] [--difficulty D] [--category C] [--out FILE]
-    ailab-ops bench [--base-url URL] [--concurrency N] [--requests N] [--scenario S]
-    ailab-ops compare [--rrf-only]         retrieval comparison across fusion modes
-    ailab-ops inspect JOB_ID               dump everything about one job, with ground truth
-
-V2 defaults to online model configuration; `replay` is explicitly offline.
-The old demo/ask/eval/bench commands remain legacy simulation utilities.
+Historical V1 simulation commands require `ailab-ops legacy <command>`.
 """
 
 from __future__ import annotations
@@ -48,7 +37,7 @@ def _short_json(d) -> str:
 # --------------------------------------------------------------------------
 
 
-def cmd_gen_data(args: argparse.Namespace) -> int:
+def cmd_legacy_gen_data(args: argparse.Namespace) -> int:
     from .datagen import generate_world, write_timeseries_csv, write_world
     from .datagen.taxonomy import load_playbook
 
@@ -85,8 +74,8 @@ def cmd_gen_data(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_demo(args: argparse.Namespace) -> int:
-    from .runtime import build_legacy_runtime as build_runtime, default_question
+def cmd_legacy_demo(args: argparse.Namespace) -> int:
+    from .legacy.runtime import build_legacy_runtime as build_runtime, default_question
 
     rt = build_runtime()
     job_id = args.job
@@ -168,8 +157,8 @@ def _print_parsed(p: dict) -> None:
         print()
 
 
-def cmd_ask(args: argparse.Namespace) -> int:
-    from .runtime import build_legacy_runtime as build_runtime
+def cmd_legacy_ask(args: argparse.Namespace) -> int:
+    from .legacy.runtime import build_legacy_runtime as build_runtime
 
     rt = build_runtime()
     result, _ = rt.diagnose(args.question)
@@ -188,8 +177,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
     from .serving import create_app
 
-    if args.llm_latency_ms is not None:
-        os.environ["AILAB_LLM_LATENCY_MS"] = str(args.llm_latency_ms)
+    if args.mode:
+        os.environ["AILAB_MODEL_MODE"] = args.mode
         reset_settings()
     s = get_settings()
     host = args.host or s.host
@@ -204,7 +193,23 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_llm_stub(args: argparse.Namespace) -> int:
+def cmd_legacy_serve(args: argparse.Namespace) -> int:
+    import uvicorn
+    from .legacy.runtime import build_legacy_runtime
+    from .serving.legacy_app import create_legacy_app
+
+    if args.llm_latency_ms is not None:
+        os.environ["AILAB_LLM_LATENCY_MS"] = str(args.llm_latency_ms)
+        reset_settings()
+    settings = get_settings()
+    print("UNSUPPORTED legacy V1 simulation; see docs/legacy-v1.md", file=sys.stderr)
+    uvicorn.run(create_legacy_app(build_legacy_runtime(settings)),
+                host=args.host or settings.host, port=args.port or settings.port,
+                log_level=settings.log_level.lower())
+    return 0
+
+
+def cmd_legacy_llm_stub(args: argparse.Namespace) -> int:
     import uvicorn
 
     from .llm.stub_server import create_stub_app
@@ -224,9 +229,9 @@ def cmd_llm_stub(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_eval(args: argparse.Namespace) -> int:
+def cmd_legacy_eval(args: argparse.Namespace) -> int:
     from .eval import build_cases, run_eval, write_cases, write_report
-    from .runtime import build_legacy_runtime as build_runtime
+    from .legacy.runtime import build_legacy_runtime as build_runtime
 
     rt = build_runtime()
     cases = build_cases(
@@ -249,7 +254,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_compare(args: argparse.Namespace) -> int:
+def cmd_legacy_compare(args: argparse.Namespace) -> int:
     """Retrieval-only comparison across fusion modes.
 
     Separating this from the end-to-end evaluation is the single most useful
@@ -260,7 +265,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
     from .datagen.taxonomy import load_playbook
     from .rag import build_knowledge_base
     from .signals import extract_log_evidence
-    from .runtime import build_legacy_runtime as build_runtime
+    from .legacy.runtime import build_legacy_runtime as build_runtime
 
     rt = build_runtime()
     pb = load_playbook()
@@ -311,7 +316,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_bench(args: argparse.Namespace) -> int:
+def cmd_legacy_bench(args: argparse.Namespace) -> int:
     import asyncio
 
     from .bench import run_benchmark, write_bench_report
@@ -370,7 +375,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_inspect(args: argparse.Namespace) -> int:
+def cmd_legacy_inspect(args: argparse.Namespace) -> int:
     """Dump one job in full, including the ground truth the agent never sees.
 
     This is the debugging view for the dataset itself: when the evaluation says
@@ -378,7 +383,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     diagnosable.
     """
     from .datagen.taxonomy import load_playbook
-    from .runtime import build_legacy_runtime as build_runtime
+    from .legacy.runtime import build_legacy_runtime as build_runtime
     from .signals import classify_series, extract_log_evidence, score_hypotheses, decide
 
     rt = build_runtime()
@@ -514,74 +519,101 @@ def cmd_eval_v2(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="ailab-ops",
-        description="AILab Ops Copilot — 面向训练与评测平台的企业级 AIOps Agent，诊断失败 job 的根因。",
+        description="AILab Ops Copilot V2: online requires a configured model/API key; "
+                    "explicit replay reads authored recordings without a key. "
+                    "V1 simulations require the unsupported legacy namespace.",
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
     for command, help_text in [("investigate", "V2 model-directed investigation"),
+                               ("demo", "V2 investigation of a curated case"),
+                               ("ask", "V2 investigation with a question"),
                                ("replay", "strict offline authored recording; not a live model")]:
-        inv = sub.add_parser(command, help=help_text)
-        inv.add_argument("--case", required=True)
-        inv.add_argument("--question", default=None)
+        inv = sub.add_parser(command, help=help_text, description=help_text + ": online requires "
+                             "a model/API key; replay is a strict authored simulation without a key.")
+        inv.add_argument("--case", required=command in {"investigate", "replay"},
+                         default="case-gpu-assert")
+        if command == "ask":
+            inv.add_argument("question")
+        else:
+            inv.add_argument("--question", default=None)
         inv.add_argument("--max-steps", type=int, default=None)
         inv.add_argument("--max-tokens", type=int, default=32768)
         inv.add_argument("--deadline-s", type=float, default=120)
-        if command == "investigate":
-            inv.add_argument("--mode", choices=["online", "replay"], default=None)
+        if command != "replay":
+            inv.add_argument("--mode", choices=["online", "replay"], default=None,
+                             help="override AILAB_MODEL_MODE (default online)")
         inv.set_defaults(fn=cmd_investigate, **({"mode": "replay"} if command == "replay" else {}))
 
-    ev2 = sub.add_parser("eval-v2", help="layered V2 evaluation (replay scores are simulation checks)")
+    ev2 = sub.add_parser("eval", aliases=["eval-v2"], help="layered V2 evaluation",
+                         description="V2 evaluation: online requires a model/API key; "
+                                     "replay scores verify authored simulation, not model capability.")
     ev2.add_argument("--mode", choices=["online", "replay"], default=None)
     ev2.add_argument("--case", action="append")
     ev2.add_argument("--repeats", type=int, default=1)
     ev2.set_defaults(fn=cmd_eval_v2)
 
-    g = sub.add_parser("gen-data", help="生成平台数据集")
+    s = sub.add_parser("serve", help="start the V2 HTTP API",
+                       description="V2 HTTP API: online requires a model/API key; "
+                                   "explicit replay uses authored recordings without a key.")
+    s.add_argument("--host", type=str, default=None)
+    s.add_argument("--port", type=int, default=None)
+    s.add_argument("--mode", choices=["online", "replay"], default=None,
+                   help="override AILAB_MODEL_MODE (default online)")
+    s.set_defaults(fn=cmd_serve)
+
+    legacy = sub.add_parser("legacy", help="UNSUPPORTED V1 simulation/regression utilities",
+                            description="UNSUPPORTED V1 simulation; see docs/legacy-v1.md. "
+                                        "Generated data and rule diagnosis share a playbook; "
+                                        "scores do not measure model capability.")
+    old = legacy.add_subparsers(dest="legacy_cmd", required=True)
+
+    g = old.add_parser("gen-data", help="generate the legacy synthetic platform dataset")
     g.add_argument("--seed", type=int, default=None)
     g.add_argument("--jobs", type=int, default=None)
     g.add_argument("--out", type=str, default=None)
-    g.set_defaults(fn=cmd_gen_data)
+    g.set_defaults(fn=cmd_legacy_gen_data)
 
-    d = sub.add_parser("demo", help="run one diagnosis end to end, offline")
+    d = old.add_parser("demo", help="UNSUPPORTED offline V1 rule simulation")
     d.add_argument("--job", type=str, default=None)
     d.add_argument("--json", action="store_true")
-    d.set_defaults(fn=cmd_demo)
+    d.set_defaults(fn=cmd_legacy_demo)
 
-    a = sub.add_parser("ask", help="ask one question")
+    a = old.add_parser("ask", help="ask the legacy simulator")
     a.add_argument("question", type=str)
-    a.set_defaults(fn=cmd_ask)
+    a.set_defaults(fn=cmd_legacy_ask)
 
-    s = sub.add_parser("serve", help="start the V2 HTTP API")
+    s = old.add_parser("serve", help="UNSUPPORTED V1 HTTP API/static UI")
     s.add_argument("--host", type=str, default=None)
     s.add_argument("--port", type=int, default=None)
     s.add_argument(
         "--llm-latency-ms", type=float, default=None,
         help="每次模型调用的模拟耗时；压测时建议设成 400~600",
     )
-    s.set_defaults(fn=cmd_serve)
+    s.set_defaults(fn=cmd_legacy_serve)
 
-    ls = sub.add_parser("llm-stub", help="run a local OpenAI-compatible endpoint (optional)")
+    ls = old.add_parser("llm-stub", help="legacy rule simulator behind an OpenAI-compatible endpoint")
     ls.add_argument("--host", type=str, default="127.0.0.1")
     ls.add_argument("--port", type=int, default=8001)
     ls.add_argument("--model", type=str, default="stub-reasoner-v1")
     ls.add_argument("--fail-rate", type=float, default=0.0)
     ls.add_argument("--latency", type=float, default=0.0)
-    ls.set_defaults(fn=cmd_llm_stub)
+    ls.set_defaults(fn=cmd_legacy_llm_stub)
 
-    e = sub.add_parser("eval", help="evaluate against ground truth")
+    e = old.add_parser("eval", help="evaluate the legacy playbook simulation")
     e.add_argument("--limit", type=int, default=100)
     e.add_argument("--difficulty", type=str, default=None, choices=["easy", "medium", "hard"])
     e.add_argument("--category", type=str, default=None)
     e.add_argument("--max-steps", type=int, default=None)
     e.add_argument("--no-unknown", action="store_true", help="exclude the unknowable cases")
     e.add_argument("--out", type=str, default=None)
-    e.set_defaults(fn=cmd_eval)
+    e.set_defaults(fn=cmd_legacy_eval)
 
-    c = sub.add_parser("compare", help="compare retrieval fusion modes")
+    c = old.add_parser("compare", help="compare legacy retrieval fusion modes")
     c.add_argument("--rrf-only", action="store_true")
-    c.set_defaults(fn=cmd_compare)
+    c.set_defaults(fn=cmd_legacy_compare)
 
-    b = sub.add_parser("bench", help="run the concurrency benchmark against a running server")
+    b = old.add_parser("bench", help="benchmark an explicitly running legacy server (not V2)")
     b.add_argument("--base-url", type=str, default="http://127.0.0.1:8080")
     b.add_argument("--concurrency", type=int, default=32)
     b.add_argument("--requests", type=int, default=200)
@@ -589,12 +621,12 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--rate", type=float, default=None, help="per-client req/s; omit for closed loop")
     b.add_argument("--jobs", nargs="*", default=None)
     b.add_argument("--out", type=str, default=None)
-    b.set_defaults(fn=cmd_bench)
+    b.set_defaults(fn=cmd_legacy_bench)
 
-    i = sub.add_parser("inspect", help="dump one job with ground truth and hypothesis scores")
+    i = old.add_parser("inspect", help="dump legacy ground truth and rule hypothesis scores")
     i.add_argument("job_id", type=str)
     i.add_argument("--logs", type=int, default=25)
-    i.set_defaults(fn=cmd_inspect)
+    i.set_defaults(fn=cmd_legacy_inspect)
 
     return p
 
@@ -602,8 +634,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    # `.env` is optional and never fatal: the project must run with an empty
-    # environment, so a missing or malformed file must not stop it.
+    # `.env` is optional. Online inference still requires validated credentials.
     _load_dotenv()
     reset_settings()
     try:

@@ -1,21 +1,9 @@
-"""Evidence extraction and hypothesis scoring.
+"""Legacy V1 evidence extraction and deterministic playbook decisions.
 
-This module is the part of the system that actually *reasons about telemetry*.
-It is deliberately separate from both the model adapter and the agent loop, for
-two reasons:
-
-1. **The mock LLM needs it.** A mock that hard-codes "if the log contains X
-   answer Y" would teach nothing and would make the evaluation meaningless.
-   This module does real work — it matches log lines against the playbook,
-   classifies metric series into shapes, applies the cascade rule, and scores
-   competing hypotheses — so the offline mode exercises the same reasoning
-   path a real model would have to perform, with the same evidence.
-2. **The evaluator needs it.** Comparing "what the agent concluded" against
-   "what the evidence actually supports" is how you separate a retrieval
-   failure from a reasoning failure from a classification failure. That
-   separation is the single most useful thing in the evaluation report.
-
-Everything here is a pure function of its inputs. No I/O, no model, no state.
+Retained for explicit legacy diagnosis, generated-world tools and regression
+tests. V2 uses model-directed hypotheses and citation validation and never
+imports this module. These shared generation/decision signatures cannot be
+used as evidence of model capability. See docs/legacy-v1.md.
 """
 
 from __future__ import annotations

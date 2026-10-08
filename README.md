@@ -27,7 +27,9 @@ ailab-ops serve --host 127.0.0.1 --port 8080
 ailab-ops replay --case case-gpu-assert
 ailab-ops replay --case case-collective-timeout
 ailab-ops replay --case case-insufficient-evidence
-ailab-ops eval-v2 --mode replay
+ailab-ops eval --mode replay
+make demo                    # 同一 V2 replay 路径
+make eval MODE=replay
 
 AILAB_MODEL_MODE=replay ailab-ops serve --host 127.0.0.1
 ```
@@ -81,8 +83,8 @@ curl -s http://127.0.0.1:8080/v2/investigations \
 ## 分层评测与验证
 
 ```bash
-ailab-ops eval-v2 --mode online --repeats 3
-ailab-ops eval-v2 --mode replay --repeats 2
+ailab-ops eval --mode online --repeats 3
+ailab-ops eval --mode replay --repeats 2
 PYTHONPATH=src python3 -m pytest tests/test_v2_runtime.py tests/test_v2_api.py -q
 PYTHONPATH=src python3 -m pytest -q
 ```
@@ -95,7 +97,9 @@ Replay 得分检查录制轨迹及工程契约，**不能说明模型能力、�
 
 复制 `.env.example` 后填入在线配置，或显式切换 `AILAB_MODEL_MODE=replay`。完整 replay 文件可通过 `AILAB_MODEL_REPLAY_PATH` 指定。环境变量优先于 .env。
 
-旧的 `demo`、`ask`、`eval`、`compare`、`inspect`、`llm-stub` 是 V1 模拟/回归工具；它们显式使用 legacy runtime。旧 `bench` 仅适用于显式 legacy 服务，不能对默认 V2 服务运行。V1 的 MockLLMClient 是手写确定性模拟器，旧生成数据、规则诊断及评分共享故障剧本，不能充当真实模型能力的证据。V2 默认入口不调用 MockLLMClient 或 signals.decide。
+`investigate`、`demo`、`ask`、`eval` 和 `serve` 都使用 V2；`eval-v2` 保留为 `eval` 的兼容别名。直接 CLI 默认 online，必须配置模型和密钥；显式 `replay` 或 `--mode replay` 是默认产品唯一无需 key 的推理模式。`make demo` 明确调用 replay，`make serve` / `make eval` 默认 online，可传 `MODE=replay`。
+
+V1 工具统一改为 `ailab-ops legacy <command>`，Make 对应 `legacy-*`，标为不支持的临时回归入口，课程发布前移除。历史版本、保留模块与旧课程适用范围见 [V1 历史说明](docs/legacy-v1.md)。
 
 本任务只提供 API 与 CLI；已有 V1 静态 UI 未迁移至 V2。非 editable 安装需部署仓库的 data/v2 资产并适配数据根路径，目前推荐源代码或 editable 安装。
 

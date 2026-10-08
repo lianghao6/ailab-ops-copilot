@@ -12,6 +12,107 @@ def replay_settings(**kw):
     return Settings(model_mode="replay", llm_api_key="", user_qps=0, **kw)
 
 
+def test_default_import_and_inference_never_load_legacy_rules_or_reasoner():
+    """An eager legacy import must fail even when only V2 is requested."""
+    import os
+    import subprocess
+    import sys
+    from ailab_ops.config import PROJECT_ROOT
+
+    program = """
+import asyncio
+import importlib.abc
+import sys
+
+class ForbidLegacy(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname in {'ailab_ops.llm.mock', 'ailab_ops.signals',
+                        'ailab_ops.serving.service', 'ailab_ops.tools.builtin'}:
+            raise AssertionError('default imported legacy module: ' + fullname)
+
+sys.meta_path.insert(0, ForbidLegacy())
+from ailab_ops.config import Settings
+from ailab_ops.runtime import build_runtime
+from ailab_ops.serving import create_app
+from ailab_ops.serving.app import create_app as compatibility_app
+rt = build_runtime(Settings(model_mode='replay', llm_api_key='', user_qps=0))
+try:
+    result = asyncio.run(rt.investigate(case_id='case-gpu-assert'))
+    assert result['phase'] == 'completed' and result['mode'] == 'replay', result
+    for factory in (create_app, compatibility_app):
+        assert '/v2/investigations' in {route.path for route in factory(rt).routes}
+finally:
+    rt.close()
+online = build_runtime(Settings(model_mode='online', llm_api_key='test-key', llm_model='live-model'))
+try:
+    assert online.model_mode == 'online'
+finally:
+    online.close()
+"""
+    result = subprocess.run([sys.executable, "-c", program], cwd=PROJECT_ROOT,
+        env={**os.environ, "PYTHONPATH": str(PROJECT_ROOT / "src")},
+        capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("command", ["investigate", "demo", "ask", "eval"])
+def test_public_inference_commands_require_online_key_unless_replay_is_explicit(command, capsys, monkeypatch):
+    from ailab_ops import cli
+    monkeypatch.setattr(cli, "_load_dotenv", lambda: None)
+    monkeypatch.setenv("AILAB_MODEL_MODE", "online")
+    monkeypatch.setenv("AILAB_LLM_API_KEY", "")
+    monkeypatch.setenv("AILAB_LLM_MODEL", "live-model")
+    arguments = {"investigate": ["--case", "case-gpu-assert"],
+                 "demo": [], "ask": ["Diagnose case-gpu-assert."], "eval": []}
+    assert cli.main([command, *arguments[command]]) == 2
+    assert "llm_api_key" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("mode", ["mock", "offline", "deterministic", "typo"])
+def test_default_runtime_rejects_unknown_and_v1_model_modes_without_key(mode):
+    with pytest.raises(ModelConfigurationError):
+        build_runtime(Settings(model_mode=mode, llm_api_key=""))
+
+
+def test_public_help_explains_modes_and_requires_explicit_legacy_namespace(capsys):
+    from ailab_ops.cli import build_parser
+    parser = build_parser()
+    help_text = parser.format_help()
+    assert "online" in help_text and "replay" in help_text and "key" in help_text
+    for command in ("demo", "ask", "eval", "investigate", "serve"):
+        with pytest.raises(SystemExit) as exit_info:
+            parser.parse_args([command, "--help"])
+        assert exit_info.value.code == 0
+        command_help = capsys.readouterr().out
+        assert "V2" in command_help and "online" in command_help and "replay" in command_help
+    for command in ("bench", "compare", "inspect", "llm-stub", "gen-data"):
+        with pytest.raises(SystemExit) as exit_info:
+            parser.parse_args([command])
+        assert exit_info.value.code == 2
+    legacy = parser.parse_args(["legacy", "demo"])
+    assert legacy.cmd == "legacy"
+
+
+def test_make_demo_and_replay_evaluation_exercise_v2_without_key():
+    import os
+    import subprocess
+    import sys
+    from ailab_ops.config import PROJECT_ROOT
+
+    env = {**os.environ, "AILAB_LLM_API_KEY": "", "AILAB_MODEL_MODE": "online"}
+    for target, extra in (("demo", []), ("eval", ["MODE=replay"])):
+        result = subprocess.run(["make", target, "PY=" + sys.executable, *extra],
+            cwd=PROJECT_ROOT, env=env, capture_output=True, text=True, timeout=20)
+        assert result.returncode == 0, result.stderr
+        assert "{" in result.stdout, "V2 Make targets must emit an investigation/evaluation JSON result"
+        output = json.loads(result.stdout[result.stdout.index("{"):])
+        assert output["mode"] == "replay"
+        if target == "demo":
+            assert output["phase"] == "completed" and output["report"]["claims"]
+        else:
+            assert len(output["runs"]) == 3 and output["summary"]["citation_validity"]["mean"] == 1.0
+
+
 def test_default_runtime_replays_complete_cited_investigation_without_key():
     rt = build_runtime(replay_settings())
     result = asyncio.run(rt.investigate(case_id="case-gpu-assert"))
