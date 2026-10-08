@@ -140,3 +140,60 @@ def test_publication_audit_rejects_truncated_font_license(tmp_path):
 def test_repository_ships_verified_complete_font_licenses():
     assert callable(getattr(qa(), "inspect_font_licenses", None)), "missing distribution-license audit"
     assert qa().inspect_font_licenses(ROOT / "docs/course/fonts") == []
+
+
+def code_starts(reader, tokens):
+    """Measure first nonspace glyph x on actual rendered PDF code baselines."""
+    from reportlab.pdfbase import pdfmetrics
+    starts = []
+    for number, page in enumerate(reader.pages):
+        def capture(text, cm, tm, font, size):
+            if size != 8 or not text.lstrip().startswith(tokens):
+                return
+            name = str(font.get("/BaseFont", ""))
+            family = deck.MONO if "JetBrainsMono" in name else deck.SANS
+            prefix = text[:len(text) - len(text.lstrip())]
+            x = tm[4] * cm[0] + tm[5] * cm[2] + cm[4]
+            starts.append((number, text.lstrip(), x + pdfmetrics.stringWidth(prefix, family, size), name))
+        page.extract_text(visitor_text=capture)
+    return starts
+
+
+def test_mixed_code_keeps_fixed_indent_and_ascii_monospace_in_real_pdf(tmp_path):
+    lesson = deck.Lesson(1, "混合代码缩进", blocks=[deck.H1("代码"), deck.Code(
+        'root_call = 1\n'
+        '    mono_call = "ascii"\n'
+        '    cjk_call = "中文状态"\n'
+        '\ttab_call = "中文"\n'
+        '        deep_call = "中文"')])
+    reader = PdfReader(deck.build(lesson, tmp_path / "indent.pdf"))
+    starts = code_starts(reader, ("root_call", "mono_call", "cjk_call", "tab_call", "deep_call"))
+    assert len(starts) == 5
+    base = starts[0][2]
+    for (_, text, x, font), offset in zip(starts, (0, 19.2, 19.2, 19.2, 38.4)):
+        assert x == pytest.approx(base + offset, abs=.01), (text, x, base + offset)
+        assert "JetBrainsMono" in font, "ASCII code must stay monospace even on CJK lines"
+    assert "中文状态" in "".join(p.extract_text() for p in reader.pages)
+
+
+def test_chapter_four_chinese_print_aligns_with_actual_api_client_block(tmp_path):
+    from lessons.l4 import LESSON
+    reader = PdfReader(deck.build(LESSON, tmp_path / "actual-chapter-four.pdf"))
+    starts = code_starts(reader, ('print("', "approved = client.post", "print(done.json"))
+    assert len(starts) == 4
+    assert all(x == pytest.approx(starts[-1][2], abs=.01) for _, _, x, _ in starts)
+
+
+def test_mixed_code_still_wraps_and_splits_without_losing_searchable_text(tmp_path):
+    text = "\n".join(f'    marker_{n} = "' + "中文_readable_value_" * 25 + '"' for n in range(45))
+    lesson = deck.Lesson(1, "混合代码跨页", blocks=[deck.H1("代码"),
+        deck.P("混排代码应当保留缩进、中文文本和跨页内容。"), deck.Code(text)])
+    path = deck.build(lesson, tmp_path / "mixed-long.pdf")
+    reader = PdfReader(path)
+    assert len(reader.pages) > 4
+    bodies = [re.sub(r"Enterprise Incident Agent V2|项目阅读材料|知识 · 代码 · 运行证据|第 \d+ 页", "", p.extract_text())
+              for p in reader.pages]
+    extracted = re.sub(r"\s+", "", "".join(bodies))
+    for n in range(45):
+        assert f'marker_{n}="' + "中文_readable_value_" * 25 + '"' in extracted
+    assert qa().inspect_pdf(path)["issues"] == []

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import re
 from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
@@ -241,8 +242,16 @@ def _code(text, st):
     for line in text.rstrip("\n").expandtabs(4).split("\n"):
         style = st["code"]
         if any(ord(char) > 127 for char in line):
-            style = ParagraphStyle("codeCJK", parent=style, fontName=SANS, wordWrap="CJK")
-        p = Paragraph(escape(line).replace(" ", "&#160;") or "&#160;", style)
+            style = ParagraphStyle("codeCJK", parent=style, wordWrap="CJK")
+        # Keep every ASCII glyph (including indentation) in Mono. Falling back
+        # for an entire CJK-containing line shrinks its leading-space columns.
+        # Escape authored text before inserting only our own trusted font tags.
+        runs = []
+        for match in re.finditer(r"[\x00-\x7f]+|[^\x00-\x7f]+", line):
+            run = match.group()
+            literal = escape(run).replace(" ", "&#160;")
+            runs.append(literal if ord(run[0]) <= 127 else f'<font name="{SANS}">{literal}</font>')
+        p = Paragraph("".join(runs) or "&#160;", style)
         rows.append([p])
     result = Table(rows, colWidths=[WIDTH], splitInRow=1)
     result.setStyle(TableStyle([
